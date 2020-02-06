@@ -2,24 +2,23 @@
 authors = ["Raphael Nestler <raphael.nestler@gmail.com>"]
 edition = "2018"
 readme = "README.md"
-name = "hello-rtfm"
+name = "rfid-audio"
 version = "0.1.0"
 
 [dependencies]
 cortex-m = "0.5.8"
 cortex-m-rt = "0.6.5"
-cortex-m-semihosting = "0.3.2"
-panic-semihosting = "0.5.1"
-cortex-m-rtfm = {git="https://github.com/japaric/cortex-m-rtfm.git"}
+cortex-m-semihosting = "0.3.3"
+panic-semihosting = "0.5.3"
+cortex-m-rtfm = "0.5.1"
 
-
-[dependencies.stm32f30x]
-version = "0.8.0"
-features= ["rt"]
+[dependencies.stm32f3xx-hal]
+features = ["stm32f303xc", "rt"]
+version = "0.4.0"
 
 # this lets you use `cargo fix`!
 [[bin]]
-name = "hello-rtfm"
+name = "rfid-audio"
 test = false
 bench = false
 
