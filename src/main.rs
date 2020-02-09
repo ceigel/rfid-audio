@@ -3,19 +3,19 @@
 
 extern crate panic_semihosting;
 
+use cortex_m::iprintln;
 use cortex_m::peripheral::ITM;
-use cortex_m::{iprint, iprintln};
 use rtfm::app;
-use stm32f3xx_hal::stm32::Interrupt;
-use stm32f3xx_hal::{prelude::*, rcc, stm32, time::Hertz, timer::Timer};
+use stm32f3xx_hal::stm32 as stm32f303;
+use stm32f3xx_hal::{prelude::*, stm32, time::Hertz};
 
 mod wavetable;
 
 const DMA_LENGTH: usize = 64;
 static mut DMA_BUFFER: [u16; DMA_LENGTH] = [0; DMA_LENGTH];
 
-pub fn init_tim2(freq: Hertz, clocks: &rcc::Clocks, tim2: &stm32::TIM2) {
-    let apb1enr = unsafe { &(*stm32::RCC::ptr()).apb1enr };
+pub fn init_tim2(freq: Hertz, clocks: &stm32f3xx_hal::rcc::Clocks, tim2: &stm32f303::TIM2) {
+    let apb1enr = unsafe { &(*stm32f303::RCC::ptr()).apb1enr };
     apb1enr.modify(|_, w| w.tim2en().set_bit());
     let sysclk = clocks.sysclk();
     let arr = sysclk.0 / freq.0;
@@ -24,8 +24,8 @@ pub fn init_tim2(freq: Hertz, clocks: &rcc::Clocks, tim2: &stm32::TIM2) {
     tim2.cr1.modify(|_, w| w.cen().enabled());
 }
 
-fn init_dac1(mut gpioa: stm32f3xx_hal::gpio::gpioa::Parts, dac: &stm32::DAC) {
-    let apb1enr = unsafe { &(*stm32::RCC::ptr()).apb1enr };
+fn init_dac1(mut gpioa: stm32f3xx_hal::gpio::gpioa::Parts, dac: &stm32f303::DAC) {
+    let apb1enr = unsafe { &(*stm32f303::RCC::ptr()).apb1enr };
     let _pa4 = gpioa.pa4.into_analog(&mut gpioa.moder, &mut gpioa.pupdr);
     apb1enr.modify(|_, w| w.dac1en().set_bit());
     dac.cr.write(|w| {
@@ -37,11 +37,11 @@ fn init_dac1(mut gpioa: stm32f3xx_hal::gpio::gpioa::Parts, dac: &stm32::DAC) {
     dac.cr.modify(|_, w| w.en1().enabled());
 }
 
-pub fn init_dma2(dma_buffer: &[u16], dac: &stm32::DAC, dma2: &stm32::DMA2) {
-    let ahbenr = unsafe { &(*stm32::RCC::ptr()).ahbenr };
+pub fn init_dma2(dma_buffer: &[u16], dac: &stm32f303::DAC, dma2: &stm32f303::DMA2) {
+    let ahbenr = unsafe { &(*stm32f303::RCC::ptr()).ahbenr };
     ahbenr.modify(|_, w| w.dma2en().set_bit());
     let ma = dma_buffer.as_ptr() as usize as u32;
-    let pa = &dac.dhr12l1 as *const stm32::dac::DHR12L1 as usize as u32;
+    let pa = &dac.dhr12r1 as *const stm32f303::dac::DHR12R1 as usize as u32;
     let ndt = dma_buffer.len() as u16;
 
     dma2.ch3.mar.write(|w| w.ma().bits(ma));
@@ -60,11 +60,14 @@ pub fn init_dma2(dma_buffer: &[u16], dac: &stm32::DAC, dma2: &stm32::DMA2) {
         w.tcie().enabled(); // trigger an interrupt when transfer is complete
         w.htie().enabled() // trigger an interrupt when half the transfer is complete
     });
-    unsafe { stm32::NVIC::unmask(Interrupt::DMA2_CH3) };
+    unsafe { stm32f303::NVIC::unmask(stm32f303::Interrupt::DMA2_CH3) };
     dac.cr.modify(|_, w| w.dmaen1().enabled());
 }
 
-fn init_clocks(cfgr: rcc::CFGR, mut flash: stm32f3xx_hal::flash::Parts) -> rcc::Clocks {
+fn init_clocks(
+    cfgr: stm32f3xx_hal::rcc::CFGR,
+    mut flash: stm32f3xx_hal::flash::Parts,
+) -> stm32f3xx_hal::rcc::Clocks {
     cfgr.use_hse(8.mhz())
         .sysclk(72.mhz())
         .hclk(72.mhz())
@@ -148,7 +151,7 @@ const APP: () = {
     }
 
     #[task(binds = DMA2_CH3, resources=[itm, dma_buffer, dma2, dac, phase])]
-    fn dma2_ch3(mut cx: dma2_ch3::Context) {
+    fn dma2_ch3(cx: dma2_ch3::Context) {
         enum State {
             HT,
             TC,
@@ -180,13 +183,13 @@ const APP: () = {
 
         let dma_buffer = cx.resources.dma_buffer;
         let buffer_len = dma_buffer.len();
-        let phase = cx.resources.phase;
+        let mut phase: f32 = *cx.resources.phase;
         // invoke audio callback
         match state {
-            State::HT => audio_callback(phase, dma_buffer, buffer_len / 2, 0),
-            State::TC => audio_callback(phase, dma_buffer, buffer_len / 2, 1),
+            State::HT => audio_callback(&mut phase, dma_buffer, buffer_len / 2, 0),
+            State::TC => audio_callback(&mut phase, dma_buffer, buffer_len / 2, 1),
             _ => (),
         }
-        cx.resources.phase = phase;
+        *cx.resources.phase = phase;
     }
 };
