@@ -14,6 +14,16 @@ mod wavetable;
 const DMA_LENGTH: usize = 64;
 static mut DMA_BUFFER: [u16; DMA_LENGTH] = [0; DMA_LENGTH];
 
+pub fn init_tim2(freq: Hertz, clocks: &rcc::Clocks, tim2: &stm32::TIM2) {
+    let apb1enr = unsafe { &(*stm32::RCC::ptr()).apb1enr };
+    apb1enr.modify(|_, w| w.tim2en().set_bit());
+    let sysclk = clocks.sysclk();
+    let arr = sysclk.0 / freq.0;
+    tim2.cr2.write(|w| w.mms().update());
+    tim2.arr.write(|w| w.arr().bits(arr));
+    tim2.cr1.modify(|_, w| w.cen().enabled());
+}
+
 fn init_dac1(mut gpioa: stm32f3xx_hal::gpio::gpioa::Parts, dac: &stm32::DAC) {
     let apb1enr = unsafe { &(*stm32::RCC::ptr()).apb1enr };
     let _pa4 = gpioa.pa4.into_analog(&mut gpioa.moder, &mut gpioa.pupdr);
@@ -25,37 +35,25 @@ fn init_dac1(mut gpioa: stm32f3xx_hal::gpio::gpioa::Parts, dac: &stm32::DAC) {
         w
     });
     dac.cr.modify(|_, w| w.en1().enabled());
-    dac.dhr8r1
-        .write(|w| unsafe { w.bits(u32::from(252 as u8)) });
-}
-
-pub fn init_tim2(freq: Hertz, clocks: &rcc::Clocks, tim2: &stm32::TIM2) {
-    let apb1enr = unsafe { &(*stm32::RCC::ptr()).apb1enr };
-    apb1enr.modify(|_, w| w.tim2en().set_bit());
-    let sysclk = clocks.sysclk();
-    let arr = sysclk.0 / freq.0;
-    tim2.cr2.write(|w| w.mms().update());
-    tim2.arr.write(|w| w.arr().bits(arr));
-    tim2.cr1.modify(|_, w| w.cen().enabled());
 }
 
 pub fn init_dma2(dma_buffer: &[u16], dac: &stm32::DAC, dma2: &stm32::DMA2) {
     let ahbenr = unsafe { &(*stm32::RCC::ptr()).ahbenr };
     ahbenr.modify(|_, w| w.dma2en().set_bit());
     let ma = dma_buffer.as_ptr() as usize as u32;
-    let pa = unsafe { &(*stm32::DAC::ptr()).dhr12l1 } as *const stm32::dac::DHR12L1 as usize as u32;
-    let ndt = dma_buffer.len();
+    let pa = &dac.dhr12l1 as *const stm32::dac::DHR12L1 as usize as u32;
+    let ndt = dma_buffer.len() as u16;
 
     dma2.ch3.mar.write(|w| w.ma().bits(ma));
     dma2.ch3.par.write(|w| w.pa().bits(pa));
-    dma2.ch3.ndtr.write(|w| w.ndt().bits(ndt as u16));
+    dma2.ch3.ndtr.write(|w| w.ndt().bits(ndt));
     dma2.ch3.cr.write(|w| {
         w.dir().from_memory(); // source is memory
         w.mem2mem().disabled(); // disable memory to memory transfer
         w.minc().enabled(); // increment memory address every transfer
         w.pinc().disabled(); // don't increment peripheral address every transfer
-        w.msize().bits32(); // memory word size is 32 bits
-        w.psize().bits32(); // peripheral word size is 32 bits
+        w.msize().bits16(); // memory word size is 32 bits
+        w.psize().bits16(); // peripheral word size is 32 bits
         w.circ().enabled(); // dma mode is circular
         w.pl().high(); // set dma priority to high
         w.teie().enabled(); // trigger an interrupt if an error occurs
@@ -150,31 +148,45 @@ const APP: () = {
     }
 
     #[task(binds = DMA2_CH3, resources=[itm, dma_buffer, dma2, dac, phase])]
-    fn dma2_ch3(cx: dma2_ch3::Context) {
-        let dma2 = cx.resources.dma2;
-        let isr = dma2.isr.read();
-        dma2.ifcr.write(|w| {
-            w.ctcif3().clear();
-            w.chtif3().clear();
-            w.cteif3().clear()
-        });
-        if isr.teif3().is_error() {
-            let dac = cx.resources.dac;
-            let dmaudr1 = dac.sr.read().dmaudr1().is_underrun();
-            let dmaudr2 = dac.sr.read().dmaudr2().is_underrun();
-            iprintln!(
-                &mut cx.resources.itm.stim[0],
-                "DMA error udr1: {}, udr2: {}",
-                dmaudr1,
-                dmaudr2
-            );
-        }
+    fn dma2_ch3(mut cx: dma2_ch3::Context) {
+        enum State {
+            HT,
+            TC,
+            Error,
+            Unknown,
+        };
+
+        // determine dma state
+        let state = {
+            let dma2 = cx.resources.dma2;
+
+            // cache interrupt status before clearing interrupt flag
+            let isr = dma2.isr.read();
+
+            // clear interrupt flag and return dma state
+            if isr.tcif3().is_complete() {
+                dma2.ifcr.write(|w| w.ctcif3().clear());
+                State::TC
+            } else if isr.htif3().is_half() {
+                dma2.ifcr.write(|w| w.chtif3().clear());
+                State::HT
+            } else if isr.teif3().is_error() {
+                dma2.ifcr.write(|w| w.cteif3().clear());
+                State::Error
+            } else {
+                State::Unknown
+            }
+        };
+
         let dma_buffer = cx.resources.dma_buffer;
         let buffer_len = dma_buffer.len();
-        if isr.htif3().is_half() {
-            audio_callback(cx.resources.phase, dma_buffer, buffer_len / 2, 0);
-        } else if isr.tcif3().is_complete() {
-            audio_callback(cx.resources.phase, dma_buffer, buffer_len / 2, 1);
+        let phase = cx.resources.phase;
+        // invoke audio callback
+        match state {
+            State::HT => audio_callback(phase, dma_buffer, buffer_len / 2, 0),
+            State::TC => audio_callback(phase, dma_buffer, buffer_len / 2, 1),
+            _ => (),
         }
+        cx.resources.phase = phase;
     }
 };
