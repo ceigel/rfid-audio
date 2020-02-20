@@ -9,8 +9,7 @@ use rtfm::app;
 use stm32f3xx_hal::stm32 as stm32f303;
 use stm32f3xx_hal::{prelude::*, stm32, time::Hertz};
 
-mod wavetable;
-
+mod wav_data;
 const DMA_LENGTH: usize = 64;
 static mut DMA_BUFFER: [u16; DMA_LENGTH] = [0; DMA_LENGTH];
 
@@ -54,11 +53,12 @@ pub fn init_dma2(dma_buffer: &[u16], dac: &stm32f303::DAC, dma2: &stm32f303::DMA
         w.pinc().disabled(); // don't increment peripheral address every transfer
         w.msize().bits16(); // memory word size is 32 bits
         w.psize().bits16(); // peripheral word size is 32 bits
-        w.circ().enabled(); // dma mode is circular
+                            //w.circ().enabled(); // dma mode is circular
         w.pl().high(); // set dma priority to high
         w.teie().enabled(); // trigger an interrupt if an error occurs
-        w.tcie().enabled(); // trigger an interrupt when transfer is complete
-        w.htie().enabled() // trigger an interrupt when half the transfer is complete
+                            // w.tcie().enabled(); // trigger an interrupt when transfer is complete
+                            //w.htie().enabled() // trigger an interrupt when half the transfer is complete
+        w
     });
     unsafe { stm32f303::NVIC::unmask(stm32f303::Interrupt::DMA2_CH3) };
     dac.cr.modify(|_, w| w.dmaen1().enabled());
@@ -76,6 +76,7 @@ fn init_clocks(
         .freeze(&mut flash.acr)
 }
 
+/*
 fn linearly_interpolate(wt: &[u16], index: f32) -> u16 {
     let int_part: usize = index as usize;
     let frac_part: f32 = index - int_part as f32;
@@ -102,16 +103,18 @@ fn audio_callback(phase: &mut f32, buffer: &mut [u16], length: usize, offset: us
         }
     }
 }
+*/
 
 #[app(device = stm32f3xx_hal::stm32, peripherals = true)]
 const APP: () = {
     struct Resources {
         itm: ITM,
-        dma_buffer: &'static mut [u16],
+        dma_buffer: &'static [u16],
         dma2: stm32::DMA2,
         dac: stm32::DAC,
         #[init(0.0)]
         phase: f32,
+        mp3: &'static [u8],
     }
     #[init]
     fn init(cx: init::Context) -> init::LateResources {
@@ -126,19 +129,21 @@ const APP: () = {
         let flash = device.FLASH.constrain();
         let mut rcc = device.RCC.constrain();
         let clocks = init_clocks(rcc.cfgr, flash);
+        init_tim2(wav_data::SAMPLE_RATE.hz(), &clocks, &device.TIM2);
         let gpioa = device.GPIOA.split(&mut rcc.ahb);
-        let dac = device.DAC;
-        init_dac1(gpioa, &dac);
-        init_tim2(44_100.hz(), &clocks, &device.TIM2);
-        let dma_buffer = unsafe { &mut DMA_BUFFER };
-        init_dma2(dma_buffer, &dac, &device.DMA2);
+        init_dac1(gpioa, &device.DAC);
+        let dma_buffer: &[u16] = &wav_data::WAV_TABLE;
+        // let dma_buffer = unsafe { &mut DMA_BUFFER };
+        init_dma2(dma_buffer, &device.DAC, &device.DMA2);
         device.DMA2.ch3.cr.modify(|_, w| w.en().enabled());
 
+        let mp3 = include_bytes!("Glass.mp3");
         init::LateResources {
             itm,
             dma_buffer,
             dma2: device.DMA2,
-            dac,
+            dac: device.DAC,
+            mp3: mp3,
         }
     }
 
@@ -150,7 +155,7 @@ const APP: () = {
         loop {}
     }
 
-    #[task(binds = DMA2_CH3, resources=[itm, dma_buffer, dma2, dac, phase])]
+    #[task(binds = DMA2_CH3, priority=2, resources=[itm, dma_buffer, dma2, dac, phase])]
     fn dma2_ch3(cx: dma2_ch3::Context) {
         enum State {
             HT,
@@ -181,7 +186,7 @@ const APP: () = {
             }
         };
 
-        let dma_buffer = cx.resources.dma_buffer;
+        /*let dma_buffer = cx.resources.dma_buffer;
         let buffer_len = dma_buffer.len();
         let mut phase: f32 = *cx.resources.phase;
         // invoke audio callback
@@ -191,5 +196,6 @@ const APP: () = {
             _ => (),
         }
         *cx.resources.phase = phase;
+        */
     }
 };
