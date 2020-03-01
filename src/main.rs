@@ -17,6 +17,7 @@ const DMA_LENGTH: usize = 2 * (mp3::MAX_SAMPLES_PER_FRAME / 2);
 struct Buffers {
     pub dma_buffer: [u16; DMA_LENGTH],
     pub mp3_decoder_data: mp3::DecoderData,
+    pub pcm_buffer: [i16; mp3::MAX_SAMPLES_PER_FRAME],
 }
 
 impl Buffers {
@@ -24,6 +25,7 @@ impl Buffers {
         Self {
             dma_buffer: [0; DMA_LENGTH],
             mp3_decoder_data: mp3::DecoderData::new(),
+            pcm_buffer: [0; mp3::MAX_SAMPLES_PER_FRAME],
         }
     }
 }
@@ -68,12 +70,18 @@ pub struct Mp3Decoder<'a> {
     decoder: mp3::Decoder<'a>,
     last_frame_rate: Option<time::Hertz>,
     data_provider: Mp3DataProvider,
+    pcm_buffer: &'a mut [i16; mp3::MAX_SAMPLES_PER_FRAME],
 }
 
 impl<'a> Mp3Decoder<'a> {
-    pub fn new(mp3_data: &'a mut mp3::DecoderData, data_provider: Mp3DataProvider) -> Self {
+    pub fn new(
+        mp3_data: &'a mut mp3::DecoderData,
+        pcm_buffer: &'a mut [i16; mp3::MAX_SAMPLES_PER_FRAME],
+        data_provider: Mp3DataProvider,
+    ) -> Self {
         Self {
             decoder: mp3::Decoder::new(mp3_data),
+            pcm_buffer: pcm_buffer,
             last_frame_rate: None,
             data_provider,
         }
@@ -81,7 +89,7 @@ impl<'a> Mp3Decoder<'a> {
 
     pub fn next_frame(&mut self, pcm_buffer: &mut [u16]) -> usize {
         let mp3: &[u8] = self.data_provider.get_buffer();
-        match self.decoder.decode(mp3) {
+        match self.decoder.decode(mp3, self.pcm_buffer) {
             mp3::DecodeResult::Successful(bytes_read, frame) => {
                 self.data_provider.advance_index(bytes_read);
                 self.last_frame_rate.replace(time::Hertz(frame.sample_rate));
@@ -311,10 +319,14 @@ const APP: () = {
         let mut gpioa = device.GPIOA.split(&mut rcc.ahb);
         let pa4 = gpioa.pa4.into_analog(&mut gpioa.moder, &mut gpioa.pupdr);
 
-        let mp3_file = include_bytes!("intro.mp3");
+        let mp3_file = include_bytes!("mama_maria.mp3");
         let data_provider = Mp3DataProvider::new(&mp3_file[..]);
         let buffers = unsafe { &mut BUFFERS };
-        let mp3_decoder: Mp3Decoder = Mp3Decoder::new(&mut buffers.mp3_decoder_data, data_provider);
+        let mp3_decoder: Mp3Decoder = Mp3Decoder::new(
+            &mut buffers.mp3_decoder_data,
+            &mut buffers.pcm_buffer,
+            data_provider,
+        );
 
         let mut sound_device = SoundDevice::new(
             &mut buffers.dma_buffer,
