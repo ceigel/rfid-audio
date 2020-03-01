@@ -158,7 +158,6 @@ impl<'a> SoundDevice<'a> {
             let arr = self.sysclk_freq.0 / freq.0;
             self.tim2.arr.write(|w| w.arr().bits(arr));
             self.tim2.cr1.modify(|_, w| w.cen().enabled());
-            self.dac.cr.modify(|_, w| w.en1().enabled());
             self.dma2.ch3.cr.modify(|_, w| w.en().enabled());
             self.playing = true
         }
@@ -167,7 +166,6 @@ impl<'a> SoundDevice<'a> {
     pub fn stop_playing(&mut self) {
         self.tim2.cr1.modify(|_, w| w.cen().disabled());
         self.dma2.ch3.cr.modify(|_, w| w.en().disabled());
-        self.dac.cr.modify(|_, w| w.en1().disabled());
         self.playing = false
     }
 
@@ -247,6 +245,7 @@ impl<'a> SoundDevice<'a> {
             w.tsel1().tim2_trgo();
             w
         });
+        self.dac.cr.modify(|_, w| w.en1().enabled());
     }
 
     pub fn init_dma2(&self, ahbenr: &stm32f303::rcc::AHBENR) {
@@ -312,7 +311,7 @@ const APP: () = {
         let mut gpioa = device.GPIOA.split(&mut rcc.ahb);
         let pa4 = gpioa.pa4.into_analog(&mut gpioa.moder, &mut gpioa.pupdr);
 
-        let mp3_file = include_bytes!("Glass.mp3");
+        let mp3_file = include_bytes!("intro.mp3");
         let data_provider = Mp3DataProvider::new(&mp3_file[..]);
         let buffers = unsafe { &mut BUFFERS };
         let mp3_decoder: Mp3Decoder = Mp3Decoder::new(&mut buffers.mp3_decoder_data, data_provider);
