@@ -4,10 +4,10 @@
 extern crate embedded_mp3 as mp3;
 use panic_itm as _;
 
+use cortex_m::iprintln;
 use cortex_m::peripheral::ITM;
-use cortex_m::{iprint, iprintln};
 use rtfm::app;
-use rtfm::cyccnt::{Instant, U32Ext as _};
+use rtfm::cyccnt::Instant;
 use stm32f3xx_hal::gpio::{gpioa, Analog};
 use stm32f3xx_hal::stm32 as stm32f303;
 use stm32f3xx_hal::stm32::Interrupt;

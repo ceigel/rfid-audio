@@ -10,7 +10,6 @@ cortex-m = "0.5.8"
 cortex-m-semihosting = "0.3.3"
 cortex-m-rtfm = "0.5.1"
 embedded-mp3 = { version = "0.1.0", path = "../embedded-mp3" }
-lazy_static = {version="1.4.0", features = ["spin_no_std"]}
 panic-itm = "0.4.1"
 
 [dependencies.stm32f3xx-hal]
