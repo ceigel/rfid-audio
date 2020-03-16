@@ -13,24 +13,40 @@ use stm32f3xx_hal::stm32 as stm32f303;
 use stm32f3xx_hal::stm32::Interrupt;
 use stm32f3xx_hal::{prelude::*, time};
 
+static MP3_FILE: &[u8] = include_bytes!("mama_maria.mp3");
+
 const DMA_LENGTH: usize = 2 * (mp3::MAX_SAMPLES_PER_FRAME / 2);
+struct CCRamBuffers {
+    pub mp3_decoder_data: mp3::DecoderData,
+}
+
 struct Buffers {
     pub dma_buffer: [u16; DMA_LENGTH],
-    pub mp3_decoder_data: mp3::DecoderData,
     pub pcm_buffer: [i16; mp3::MAX_SAMPLES_PER_FRAME],
+    pub mp3_data: Mp3DataProvider,
+}
+
+impl CCRamBuffers {
+    pub const fn new() -> Self {
+        Self {
+            mp3_decoder_data: mp3::DecoderData::new(),
+        }
+    }
 }
 
 impl Buffers {
     pub const fn new() -> Self {
         Self {
             dma_buffer: [0; DMA_LENGTH],
-            mp3_decoder_data: mp3::DecoderData::new(),
             pcm_buffer: [0; mp3::MAX_SAMPLES_PER_FRAME],
+            mp3_data: Mp3DataProvider::new(),
         }
     }
 }
 
 static mut BUFFERS: Buffers = Buffers::new();
+#[link_section = ".ccram_data"]
+static mut CCRAM_BUFFERS: CCRamBuffers = CCRamBuffers::new();
 
 fn apb1enr() -> &'static stm32f303::rcc::APB1ENR {
     unsafe { &(*stm32f303::RCC::ptr()).apb1enr }
@@ -44,32 +60,116 @@ fn enable_dma2_ch3_interrupt() {
     unsafe { stm32f303::NVIC::unmask(Interrupt::DMA2_CH3) };
 }
 
+pub struct DataReader {
+    data: &'static [u8],
+}
+
+impl DataReader {
+    pub fn new(data: &'static [u8]) -> Self {
+        Self { data }
+    }
+    pub fn read_data(&mut self, out: &mut [u8]) -> usize {
+        let bytes_red = out.len().max(self.data.len());
+        out.copy_from_slice(&self.data[..bytes_red]);
+        self.data = &self.data[bytes_red..];
+        bytes_red
+    }
+}
+
+const MP3_DATA_LENGTH: usize = 16384;
+const MP3_MAX_READ: usize = MP3_DATA_LENGTH / 8;
 pub struct Mp3DataProvider {
-    mp3_data: &'static [u8],
     read_index: usize,
+    read_end: usize,
+    write_index: usize,
+    last_frame_index: usize,
+    read_complete: bool,
+    mp3_data: [u8; MP3_DATA_LENGTH],
 }
 
 impl Mp3DataProvider {
-    pub fn new(mp3_data: &'static [u8]) -> Self {
+    pub const fn new() -> Self {
         Self {
-            mp3_data,
             read_index: 0,
+            read_end: 0,
+            write_index: 0,
+            last_frame_index: 0,
+            read_complete: false,
+            mp3_data: [0; MP3_DATA_LENGTH],
         }
     }
 
-    pub fn get_buffer(&self) -> &'static [u8] {
-        &self.mp3_data[self.read_index..]
+    pub fn get_buffer(&self) -> &[u8] {
+        &self.mp3_data[self.read_index..self.read_end]
     }
 
     pub fn advance_index(&mut self, offset: usize) {
         self.read_index += offset;
+        if self.write_index < self.read_index && self.read_index == self.read_end {
+            self.read_index = 0;
+            self.read_end = self.write_index;
+        }
+    }
+    pub fn fill_bufer<'a>(
+        &mut self,
+        data_reader: &mut DataReader,
+        mp3_decoder: &'a mut Mp3Decoder,
+    ) {
+        if !self.prepare_read() {
+            return;
+        }
+        let write_end = if self.write_index < self.read_index {
+            self.read_index
+        } else {
+            MP3_DATA_LENGTH
+        };
+        let to_read = MP3_MAX_READ.min(write_end - self.write_index);
+        let out_slice = &mut self.mp3_data[self.write_index..to_read];
+        let bytes_red = data_reader.read_data(out_slice);
+        if bytes_red < to_read {
+            self.read_complete = true
+        }
+        self.write_index += bytes_red;
+        if self.write_index == MP3_DATA_LENGTH {
+            self.write_index = 0;
+        }
+        self.set_last_frame(bytes_red, mp3_decoder);
+        if self.read_end < self.write_index {
+            self.read_end = self.last_frame_index;
+        }
+    }
+
+    fn prepare_read(&mut self) -> bool {
+        if self.read_complete {
+            return false;
+        }
+        if self.write_index < self.read_index && self.read_index - self.write_index < MP3_MAX_READ {
+            return false; //not enough space to read
+        }
+        if self.write_index == 0 && self.read_index >= MP3_MAX_READ {
+            let uncomplete_len = MP3_DATA_LENGTH - self.last_frame_index;
+            let (left, right) = self.mp3_data.split_at_mut(self.last_frame_index);
+            left[0..uncomplete_len].copy_from_slice(right);
+            self.write_index = uncomplete_len;
+        } //else (self.read_index < self.write_index) can read
+        return true;
+    }
+
+    fn set_last_frame<'a>(&mut self, max_bytes: usize, mp3_decoder: &'a mut Mp3Decoder) {
+        loop {
+            let (begin, end) = (self.last_frame_index, self.last_frame_index + max_bytes);
+            if let Some(bytes) = mp3_decoder.next_frame_size(&self.mp3_data[begin..end]) {
+                self.last_frame_index += bytes;
+            } else {
+                break;
+            }
+        }
     }
 }
 
 pub struct Mp3Decoder<'a> {
     decoder: mp3::Decoder<'a>,
     last_frame_rate: Option<time::Hertz>,
-    data_provider: Mp3DataProvider,
     pcm_buffer: &'a mut [i16; mp3::MAX_SAMPLES_PER_FRAME],
 }
 
@@ -77,21 +177,35 @@ impl<'a> Mp3Decoder<'a> {
     pub fn new(
         mp3_data: &'a mut mp3::DecoderData,
         pcm_buffer: &'a mut [i16; mp3::MAX_SAMPLES_PER_FRAME],
-        data_provider: Mp3DataProvider,
     ) -> Self {
         Self {
             decoder: mp3::Decoder::new(mp3_data),
             pcm_buffer: pcm_buffer,
             last_frame_rate: None,
-            data_provider,
         }
     }
 
-    pub fn next_frame(&mut self, pcm_buffer: &mut [u16]) -> usize {
-        let mp3: &[u8] = self.data_provider.get_buffer();
+    pub fn next_frame_size(&mut self, mp3_buffer: &[u8]) -> Option<usize> {
+        match self.decoder.peek(mp3_buffer) {
+            mp3::DecodeResult::Successful(bytes, _) | mp3::DecodeResult::SkippedData(bytes) => {
+                Some(bytes)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn next_frame(
+        &mut self,
+        data_provider: &mut Mp3DataProvider,
+        pcm_buffer: &mut [u16],
+    ) -> usize {
+        let mp3: &[u8] = data_provider.get_buffer();
+        if mp3.len() == 0 {
+            return 0;
+        }
         match self.decoder.decode(mp3, self.pcm_buffer) {
             mp3::DecodeResult::Successful(bytes_read, frame) => {
-                self.data_provider.advance_index(bytes_read);
+                data_provider.advance_index(bytes_read);
                 self.last_frame_rate.replace(time::Hertz(frame.sample_rate));
                 let samples = frame
                     .samples
@@ -107,8 +221,8 @@ impl<'a> Mp3Decoder<'a> {
                 index
             }
             mp3::DecodeResult::SkippedData(skipped_data) => {
-                self.data_provider.advance_index(skipped_data);
-                self.next_frame(pcm_buffer)
+                data_provider.advance_index(skipped_data);
+                self.next_frame(data_provider, pcm_buffer)
             }
             mp3::DecodeResult::InsufficientData => 0,
         }
@@ -126,6 +240,8 @@ pub enum DmaState {
 pub struct SoundDevice<'a> {
     dma_buffer: &'a mut [u16; DMA_LENGTH],
     mp3_decoder: Mp3Decoder<'a>,
+    mp3_data_provider: &'a mut Mp3DataProvider,
+    data_reader: DataReader,
     stop_at_buffer_len: Option<u16>,
     dma2: stm32f303::DMA2,
     dac: stm32f303::DAC,
@@ -138,6 +254,8 @@ impl<'a> SoundDevice<'a> {
     pub fn new(
         dma_buffer: &'a mut [u16; DMA_LENGTH],
         mp3_decoder: Mp3Decoder<'a>,
+        mp3_data_provider: &'a mut Mp3DataProvider,
+        data_reader: DataReader,
         sysclk: time::Hertz,
         tim2: stm32f303::TIM2,
         dac: stm32f303::DAC,
@@ -148,6 +266,8 @@ impl<'a> SoundDevice<'a> {
         let obj = Self {
             dma_buffer,
             mp3_decoder,
+            mp3_data_provider,
+            data_reader,
             stop_at_buffer_len: None,
             tim2,
             dma2,
@@ -184,7 +304,9 @@ impl<'a> SoundDevice<'a> {
             1 => &mut self.dma_buffer[buffer_len / 2..buffer_len],
             _ => panic!("Buffer index {} not expected", buffer_index),
         };
-        let filled = self.mp3_decoder.next_frame(dma_buffer_slice);
+        let filled = self
+            .mp3_decoder
+            .next_frame(self.mp3_data_provider, dma_buffer_slice);
         if filled < buffer_len / 2 {
             iprintln!(
                 &mut itm.stim[0],
@@ -196,9 +318,9 @@ impl<'a> SoundDevice<'a> {
             if buffer_index == 1 {
                 self.set_dma_stop();
             }
-        }
-        if filled == 0 {
-            self.stop_playing();
+        } else {
+            self.mp3_data_provider
+                .fill_bufer(&mut self.data_reader, &mut self.mp3_decoder)
         }
     }
 
@@ -319,18 +441,17 @@ const APP: () = {
         let mut gpioa = device.GPIOA.split(&mut rcc.ahb);
         let pa4 = gpioa.pa4.into_analog(&mut gpioa.moder, &mut gpioa.pupdr);
 
-        let mp3_file = include_bytes!("mama_maria.mp3");
-        let data_provider = Mp3DataProvider::new(&mp3_file[..]);
+        let data_reader = DataReader::new(MP3_FILE);
         let buffers = unsafe { &mut BUFFERS };
-        let mp3_decoder: Mp3Decoder = Mp3Decoder::new(
-            &mut buffers.mp3_decoder_data,
-            &mut buffers.pcm_buffer,
-            data_provider,
-        );
+        let ccram_buffers = unsafe { &mut CCRAM_BUFFERS };
+        let mp3_decoder: Mp3Decoder =
+            Mp3Decoder::new(&mut ccram_buffers.mp3_decoder_data, &mut buffers.pcm_buffer);
 
         let mut sound_device = SoundDevice::new(
             &mut buffers.dma_buffer,
             mp3_decoder,
+            &mut buffers.mp3_data,
+            data_reader,
             clocks.sysclk(),
             device.TIM2,
             device.DAC,
@@ -345,8 +466,8 @@ const APP: () = {
 
         init::LateResources {
             itm,
-            pa4,
             sound_device,
+            pa4,
         }
     }
 
