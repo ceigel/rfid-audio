@@ -4,18 +4,27 @@
 extern crate embedded_mp3 as mp3;
 use panic_itm as _;
 
-use cortex_m::iprintln;
-use cortex_m::peripheral::ITM;
+use cortex_m_log::destination;
+use cortex_m_log::log::Logger;
+use cortex_m_log::printer::itm::InterruptSync;
+use embedded_sdmmc as sdmmc;
+use hal::gpio::{gpioa, Analog, Floating, Input, Output, PushPull, AF5};
+use hal::hal as embedded_hal;
+use hal::spi::{Phase, Polarity, Spi};
+use log::{error, info};
 use rtfm::app;
 use rtfm::cyccnt::Instant;
-use stm32f3xx_hal::gpio::{gpioa, Analog};
+use stm32f3xx_hal as hal;
 use stm32f3xx_hal::stm32 as stm32f303;
 use stm32f3xx_hal::stm32::Interrupt;
 use stm32f3xx_hal::{prelude::*, time};
 
-static MP3_FILE: &[u8] = include_bytes!("mama_maria.mp3");
-
 const DMA_LENGTH: usize = 2 * (mp3::MAX_SAMPLES_PER_FRAME / 2);
+const MP3_DATA_LENGTH: usize = 16384;
+const MP3_MAX_READ: usize = MP3_DATA_LENGTH / 8;
+static mut LOGGER: Option<Logger<InterruptSync>> = None;
+const INTRO_FILE_NAME: &str = "intro.mp3";
+
 struct CCRamBuffers {
     pub mp3_decoder_data: mp3::DecoderData,
 }
@@ -23,7 +32,7 @@ struct CCRamBuffers {
 struct Buffers {
     pub dma_buffer: [u16; DMA_LENGTH],
     pub pcm_buffer: [i16; mp3::MAX_SAMPLES_PER_FRAME],
-    pub mp3_data: Mp3DataProvider,
+    pub mp3_data: [u8; MP3_DATA_LENGTH],
 }
 
 impl CCRamBuffers {
@@ -39,7 +48,7 @@ impl Buffers {
         Self {
             dma_buffer: [0; DMA_LENGTH],
             pcm_buffer: [0; mp3::MAX_SAMPLES_PER_FRAME],
-            mp3_data: Mp3DataProvider::new(),
+            mp3_data: [0; MP3_DATA_LENGTH],
         }
     }
 }
@@ -48,99 +57,192 @@ static mut BUFFERS: Buffers = Buffers::new();
 #[link_section = ".ccram_data"]
 static mut CCRAM_BUFFERS: CCRamBuffers = CCRamBuffers::new();
 
-fn apb1enr() -> &'static stm32f303::rcc::APB1ENR {
-    unsafe { &(*stm32f303::RCC::ptr()).apb1enr }
+struct DummyTimeSource {}
+impl sdmmc::TimeSource for DummyTimeSource {
+    fn get_timestamp(&self) -> sdmmc::Timestamp {
+        sdmmc::Timestamp::from_calendar(2020, 3, 7, 13, 23, 0).expect("To create date")
+    }
 }
 
-fn ahbenr() -> &'static stm32f303::rcc::AHBENR {
-    unsafe { &(*stm32f303::RCC::ptr()).ahbenr }
-}
-
-fn enable_dma2_ch3_interrupt() {
-    unsafe { stm32f303::NVIC::unmask(Interrupt::DMA2_CH3) };
-}
-
+type FileError = sdmmc::Error<sdmmc::SdMmcError>;
 pub struct DataReader {
-    data: &'static [u8],
+    file: sdmmc::File,
+    file_name: sdmmc::ShortFileName,
 }
 
 impl DataReader {
-    pub fn new(data: &'static [u8]) -> Self {
-        Self { data }
+    pub fn new(file: sdmmc::File, file_name: sdmmc::ShortFileName) -> Self {
+        DataReader { file, file_name }
     }
-    pub fn read_data(&mut self, out: &mut [u8]) -> usize {
-        let bytes_red = out.len().max(self.data.len());
-        out.copy_from_slice(&self.data[..bytes_red]);
-        self.data = &self.data[bytes_red..];
-        bytes_red
+
+    pub fn read_data(
+        &mut self,
+        file_reader: &mut impl FileReader,
+        out: &mut [u8],
+    ) -> Result<usize, FileError> {
+        file_reader.read_data(&mut self.file, out)
+    }
+
+    pub fn file_name(&self) -> sdmmc::ShortFileName {
+        self.file_name.clone()
     }
 }
 
-const MP3_DATA_LENGTH: usize = 16384;
-const MP3_MAX_READ: usize = MP3_DATA_LENGTH / 8;
-pub struct Mp3DataProvider {
+pub trait FileReader {
+    fn read_data(&mut self, file: &mut sdmmc::File, out: &mut [u8]) -> Result<usize, FileError>;
+}
+
+pub struct SdCardReader<SPI, CS>
+where
+    SPI: embedded_hal::spi::FullDuplex<u8>,
+    CS: embedded_hal::digital::v2::OutputPin,
+    <SPI as embedded_hal::spi::FullDuplex<u8>>::Error: core::fmt::Debug,
+{
+    controller: sdmmc::Controller<sdmmc::SdMmcSpi<SPI, CS>, DummyTimeSource>,
+    volume: sdmmc::Volume,
+    root_dir: sdmmc::Directory,
+}
+
+impl<SPI, CS> SdCardReader<SPI, CS>
+where
+    SPI: embedded_hal::spi::FullDuplex<u8>,
+    CS: embedded_hal::digital::v2::OutputPin,
+    <SPI as embedded_hal::spi::FullDuplex<u8>>::Error: core::fmt::Debug,
+{
+    pub fn new(spi: SPI, cs: CS) -> Result<Self, FileError> {
+        let ts = DummyTimeSource {};
+        let mut controller = sdmmc::Controller::new(sdmmc::SdMmcSpi::new(spi, cs), ts);
+        controller
+            .device()
+            .init()
+            .map_err(|e| sdmmc::Error::DeviceError(e))?;
+        let volume = controller.get_volume(sdmmc::VolumeIdx(0))?;
+        let root_dir = controller.open_root_dir(&volume)?;
+        Ok(Self {
+            controller,
+            volume,
+            root_dir,
+        })
+    }
+
+    pub fn open_intro(&mut self) -> Result<DataReader, FileError> {
+        let file = self.controller.open_file_in_dir(
+            &mut self.volume,
+            &self.root_dir,
+            INTRO_FILE_NAME,
+            sdmmc::Mode::ReadOnly,
+        )?;
+        let file_name = sdmmc::ShortFileName::create_from_str(INTRO_FILE_NAME)
+            .map_err(|e| FileError::FilenameError(e))?;
+        Ok(DataReader::new(file, file_name))
+    }
+}
+
+impl<SPI, CS> FileReader for SdCardReader<SPI, CS>
+where
+    SPI: embedded_hal::spi::FullDuplex<u8>,
+    CS: embedded_hal::digital::v2::OutputPin,
+    <SPI as embedded_hal::spi::FullDuplex<u8>>::Error: core::fmt::Debug,
+{
+    fn read_data(&mut self, file: &mut sdmmc::File, out: &mut [u8]) -> Result<usize, FileError> {
+        self.controller.read(&self.volume, file, out)
+    }
+}
+
+#[derive(Debug)]
+pub enum PlayError {
+    FileError(FileError),
+    NoValidMp3Frame,
+}
+
+pub struct Mp3Player<'a> {
     read_index: usize,
     read_end: usize,
     write_index: usize,
     last_frame_index: usize,
-    read_complete: bool,
-    mp3_data: [u8; MP3_DATA_LENGTH],
+    mp3_data: &'a mut [u8; MP3_DATA_LENGTH],
+    decoder: mp3::Decoder<'a>,
+    last_frame_rate: Option<time::Hertz>,
+    pcm_buffer: &'a mut [i16; mp3::MAX_SAMPLES_PER_FRAME],
+    current_song: Option<DataReader>,
 }
 
-impl Mp3DataProvider {
-    pub const fn new() -> Self {
+impl<'a> Mp3Player<'a> {
+    pub fn new(
+        mp3_data: &'a mut [u8; MP3_DATA_LENGTH],
+        decoder_data: &'a mut mp3::DecoderData,
+        pcm_buffer: &'a mut [i16; mp3::MAX_SAMPLES_PER_FRAME],
+    ) -> Self {
         Self {
             read_index: 0,
             read_end: 0,
             write_index: 0,
             last_frame_index: 0,
-            read_complete: false,
-            mp3_data: [0; MP3_DATA_LENGTH],
+            mp3_data,
+            decoder: mp3::Decoder::new(decoder_data),
+            pcm_buffer: pcm_buffer,
+            last_frame_rate: None,
+            current_song: None,
         }
     }
 
-    pub fn get_buffer(&self) -> &[u8] {
-        &self.mp3_data[self.read_index..self.read_end]
-    }
-
-    pub fn advance_index(&mut self, offset: usize) {
-        self.read_index += offset;
-        if self.write_index < self.read_index && self.read_index == self.read_end {
-            self.read_index = 0;
-            self.read_end = self.write_index;
-        }
-    }
-    pub fn fill_bufer<'a>(
+    pub fn play_song(
         &mut self,
-        data_reader: &mut DataReader,
-        mp3_decoder: &'a mut Mp3Decoder,
-    ) {
+        data_reader: DataReader,
+        file_reader: &mut impl FileReader,
+        sound_device: &mut SoundDevice,
+    ) -> Result<(), PlayError> {
+        self.current_song.replace(data_reader);
+        self.init_buffer(file_reader)
+            .map_err(|e| PlayError::FileError(e))?;
+        let last_frame_rate = self.last_frame_rate.ok_or(PlayError::NoValidMp3Frame)?;
+        sound_device.start_playing(self, file_reader, last_frame_rate)
+    }
+
+    pub fn fill_buffer(&mut self, file_reader: &mut impl FileReader) -> Result<(), FileError> {
+        self.fill_buffer_intern(file_reader, MP3_MAX_READ)
+    }
+
+    fn init_buffer(&mut self, file_reader: &mut impl FileReader) -> Result<(), FileError> {
+        self.fill_buffer_intern(file_reader, MP3_DATA_LENGTH)
+    }
+
+    pub fn fill_buffer_intern(
+        &mut self,
+        file_reader: &mut impl FileReader,
+        max_read: usize,
+    ) -> Result<(), FileError> {
         if !self.prepare_read() {
-            return;
+            return Ok(());
         }
+        let data_reader = self
+            .current_song
+            .as_mut()
+            .expect("prepare_read to have returned");
         let write_end = if self.write_index < self.read_index {
             self.read_index
         } else {
             MP3_DATA_LENGTH
         };
-        let to_read = MP3_MAX_READ.min(write_end - self.write_index);
-        let out_slice = &mut self.mp3_data[self.write_index..to_read];
-        let bytes_red = data_reader.read_data(out_slice);
+        let to_read = max_read.min(write_end - self.write_index);
+        let out_slice = &mut self.mp3_data[self.write_index..to_read + self.write_index];
+        let bytes_red = data_reader.read_data(file_reader, out_slice)?;
         if bytes_red < to_read {
-            self.read_complete = true
+            self.current_song.take();
+        }
+        self.set_last_frame(bytes_red + self.write_index);
+        if self.read_end < self.write_index {
+            self.read_end = self.last_frame_index;
         }
         self.write_index += bytes_red;
         if self.write_index == MP3_DATA_LENGTH {
             self.write_index = 0;
         }
-        self.set_last_frame(bytes_red, mp3_decoder);
-        if self.read_end < self.write_index {
-            self.read_end = self.last_frame_index;
-        }
+        Ok(())
     }
 
     fn prepare_read(&mut self) -> bool {
-        if self.read_complete {
+        if self.current_song.is_none() {
             return false;
         }
         if self.write_index < self.read_index && self.read_index - self.write_index < MP3_MAX_READ {
@@ -151,42 +253,30 @@ impl Mp3DataProvider {
             let (left, right) = self.mp3_data.split_at_mut(self.last_frame_index);
             left[0..uncomplete_len].copy_from_slice(right);
             self.write_index = uncomplete_len;
+            self.last_frame_index = 0;
         } //else (self.read_index < self.write_index) can read
         return true;
     }
 
-    fn set_last_frame<'a>(&mut self, max_bytes: usize, mp3_decoder: &'a mut Mp3Decoder) {
+    fn set_last_frame(&mut self, end_index: usize) {
         loop {
-            let (begin, end) = (self.last_frame_index, self.last_frame_index + max_bytes);
-            if let Some(bytes) = mp3_decoder.next_frame_size(&self.mp3_data[begin..end]) {
+            let (begin, end) = (self.last_frame_index, end_index);
+            let frame_size = self.next_frame_size(begin, end);
+            if let Some(bytes) = frame_size {
+                if bytes + self.last_frame_index > end_index {
+                    break;
+                }
                 self.last_frame_index += bytes;
             } else {
                 break;
             }
         }
     }
-}
 
-pub struct Mp3Decoder<'a> {
-    decoder: mp3::Decoder<'a>,
-    last_frame_rate: Option<time::Hertz>,
-    pcm_buffer: &'a mut [i16; mp3::MAX_SAMPLES_PER_FRAME],
-}
-
-impl<'a> Mp3Decoder<'a> {
-    pub fn new(
-        mp3_data: &'a mut mp3::DecoderData,
-        pcm_buffer: &'a mut [i16; mp3::MAX_SAMPLES_PER_FRAME],
-    ) -> Self {
-        Self {
-            decoder: mp3::Decoder::new(mp3_data),
-            pcm_buffer: pcm_buffer,
-            last_frame_rate: None,
-        }
-    }
-
-    pub fn next_frame_size(&mut self, mp3_buffer: &[u8]) -> Option<usize> {
-        match self.decoder.peek(mp3_buffer) {
+    fn next_frame_size(&mut self, mp3_data_begin: usize, mp3_data_end: usize) -> Option<usize> {
+        let mp3_buffer = &self.mp3_data[mp3_data_begin..mp3_data_end];
+        let peek = self.decoder.peek(mp3_buffer);
+        match peek {
             mp3::DecodeResult::Successful(bytes, _) | mp3::DecodeResult::SkippedData(bytes) => {
                 Some(bytes)
             }
@@ -194,35 +284,56 @@ impl<'a> Mp3Decoder<'a> {
         }
     }
 
-    pub fn next_frame(
-        &mut self,
-        data_provider: &mut Mp3DataProvider,
-        pcm_buffer: &mut [u16],
-    ) -> usize {
-        let mp3: &[u8] = data_provider.get_buffer();
+    pub fn next_frame(&mut self, dma_buffer: &mut [u16]) -> usize {
+        fn advance_read_index(
+            offset: usize,
+            read_index: &mut usize,
+            read_end: &mut usize,
+            write_index: usize,
+        ) {
+            *read_index += offset;
+            if write_index < *read_index && *read_index == *read_end {
+                *read_index = 0;
+                *read_end = write_index;
+            }
+        }
+
+        let mp3: &[u8] = &self.mp3_data[self.read_index..self.read_end];
         if mp3.len() == 0 {
             return 0;
         }
-        match self.decoder.decode(mp3, self.pcm_buffer) {
+        let pcm_buffer = &mut self.pcm_buffer;
+        let decode_result = self.decoder.decode(mp3, pcm_buffer);
+        match decode_result {
             mp3::DecodeResult::Successful(bytes_read, frame) => {
-                data_provider.advance_index(bytes_read);
-                self.last_frame_rate.replace(time::Hertz(frame.sample_rate));
-                let samples = frame
-                    .samples
+                advance_read_index(
+                    bytes_read,
+                    &mut self.read_index,
+                    &mut self.read_end,
+                    self.write_index,
+                );
+                let freq = frame.sample_rate;
+                self.last_frame_rate.replace(freq.hz());
+                let samples = pcm_buffer
                     .iter()
                     .step_by(frame.channels as usize)
                     .take(frame.sample_count as usize)
                     .map(|sample| ((*sample as i32) - (core::i16::MIN as i32)) as u16 >> 4);
                 let mut index: usize = 0;
                 for val in samples {
-                    pcm_buffer[index] = val;
+                    dma_buffer[index] = val;
                     index += 1;
                 }
                 index
             }
             mp3::DecodeResult::SkippedData(skipped_data) => {
-                data_provider.advance_index(skipped_data);
-                self.next_frame(data_provider, pcm_buffer)
+                advance_read_index(
+                    skipped_data,
+                    &mut self.read_index,
+                    &mut self.read_end,
+                    self.write_index,
+                );
+                self.next_frame(dma_buffer)
             }
             mp3::DecodeResult::InsufficientData => 0,
         }
@@ -239,9 +350,6 @@ pub enum DmaState {
 
 pub struct SoundDevice<'a> {
     dma_buffer: &'a mut [u16; DMA_LENGTH],
-    mp3_decoder: Mp3Decoder<'a>,
-    mp3_data_provider: &'a mut Mp3DataProvider,
-    data_reader: DataReader,
     stop_at_buffer_len: Option<u16>,
     dma2: stm32f303::DMA2,
     dac: stm32f303::DAC,
@@ -253,9 +361,6 @@ pub struct SoundDevice<'a> {
 impl<'a> SoundDevice<'a> {
     pub fn new(
         dma_buffer: &'a mut [u16; DMA_LENGTH],
-        mp3_decoder: Mp3Decoder<'a>,
-        mp3_data_provider: &'a mut Mp3DataProvider,
-        data_reader: DataReader,
         sysclk: time::Hertz,
         tim2: stm32f303::TIM2,
         dac: stm32f303::DAC,
@@ -265,9 +370,6 @@ impl<'a> SoundDevice<'a> {
         let ahbenr = ahbenr();
         let obj = Self {
             dma_buffer,
-            mp3_decoder,
-            mp3_data_provider,
-            data_reader,
             stop_at_buffer_len: None,
             tim2,
             dma2,
@@ -281,14 +383,20 @@ impl<'a> SoundDevice<'a> {
         obj
     }
 
-    pub fn start_playing(&mut self) {
-        if let Some(freq) = self.mp3_decoder.last_frame_rate {
-            let arr = self.sysclk_freq.0 / freq.0;
-            self.tim2.arr.write(|w| w.arr().bits(arr));
-            self.tim2.cr1.modify(|_, w| w.cen().enabled());
-            self.dma2.ch3.cr.modify(|_, w| w.en().enabled());
-            self.playing = true
-        }
+    pub fn start_playing(
+        &mut self,
+        mp3_player: &mut Mp3Player,
+        file_reader: &mut impl FileReader,
+        freq: time::Hertz,
+    ) -> Result<(), PlayError> {
+        self.fill_pcm_buffer(0, mp3_player, file_reader)?;
+        self.fill_pcm_buffer(1, mp3_player, file_reader)?;
+        let arr = self.sysclk_freq.0 / freq.0;
+        self.tim2.arr.write(|w| w.arr().bits(arr));
+        self.tim2.cr1.modify(|_, w| w.cen().enabled());
+        self.dma2.ch3.cr.modify(|_, w| w.en().enabled());
+        self.playing = true;
+        Ok(())
     }
 
     pub fn stop_playing(&mut self) {
@@ -297,30 +405,30 @@ impl<'a> SoundDevice<'a> {
         self.playing = false
     }
 
-    pub fn fill_pcm_buffer(&mut self, buffer_index: usize, itm: &mut ITM) {
+    pub fn fill_pcm_buffer(
+        &mut self,
+        buffer_index: usize,
+        mp3_player: &mut Mp3Player,
+        file_reader: &mut impl FileReader,
+    ) -> Result<(), PlayError> {
         let buffer_len = self.dma_buffer.len();
         let dma_buffer_slice: &mut [u16] = match buffer_index {
             0 => &mut self.dma_buffer[0..buffer_len / 2],
             1 => &mut self.dma_buffer[buffer_len / 2..buffer_len],
             _ => panic!("Buffer index {} not expected", buffer_index),
         };
-        let filled = self
-            .mp3_decoder
-            .next_frame(self.mp3_data_provider, dma_buffer_slice);
+        let filled = mp3_player.next_frame(dma_buffer_slice);
         if filled < buffer_len / 2 {
-            iprintln!(
-                &mut itm.stim[0],
-                "Finishing music {}, {}",
-                buffer_index,
-                filled
-            );
+            info!("Finishing music {}, {}", buffer_index, filled);
             self.stop_at_buffer_len = Some(filled as u16);
             if buffer_index == 1 {
                 self.set_dma_stop();
             }
+            Ok(())
         } else {
-            self.mp3_data_provider
-                .fill_bufer(&mut self.data_reader, &mut self.mp3_decoder)
+            mp3_player
+                .fill_buffer(file_reader)
+                .map_err(|e| PlayError::FileError(e))
         }
     }
 
@@ -418,17 +526,59 @@ fn init_clocks(
         .freeze(&mut flash.acr)
 }
 
+type SpiPins = (
+    hal::gpio::gpioa::PA5<AF5>,
+    hal::gpio::gpioa::PA6<AF5>,
+    hal::gpio::gpioa::PA7<AF5>,
+);
+type SpiType = Spi<hal::stm32::SPI1, SpiPins>;
+
+fn init_spi(
+    spi1: hal::stm32::SPI1,
+    sck: hal::gpio::gpioa::PA5<Input<Floating>>,
+    miso: hal::gpio::gpioa::PA6<Input<Floating>>,
+    mosi: hal::gpio::gpioa::PA7<Input<Floating>>,
+    moder: &mut gpioa::MODER,
+    afrl: &mut gpioa::AFRL,
+    apb2: &mut hal::rcc::APB2,
+    clocks: &hal::rcc::Clocks,
+    freq: impl Into<hal::time::Hertz>,
+) -> SpiType {
+    let sck = sck.into_af5(moder, afrl);
+    let miso = miso.into_af5(moder, afrl);
+    let mosi = mosi.into_af5(moder, afrl);
+    let spi_mode = embedded_hal::spi::Mode {
+        polarity: Polarity::IdleLow,
+        phase: Phase::CaptureOnFirstTransition,
+    };
+
+    let spi = Spi::spi1(spi1, (sck, miso, mosi), spi_mode, freq, *clocks, apb2);
+    spi
+}
+
+fn apb1enr() -> &'static stm32f303::rcc::APB1ENR {
+    unsafe { &(*stm32f303::RCC::ptr()).apb1enr }
+}
+
+fn ahbenr() -> &'static stm32f303::rcc::AHBENR {
+    unsafe { &(*stm32f303::RCC::ptr()).ahbenr }
+}
+
+fn enable_dma2_ch3_interrupt() {
+    unsafe { stm32f303::NVIC::unmask(Interrupt::DMA2_CH3) };
+}
+
 #[app(device = stm32f3xx_hal::stm32, monotonic = rtfm::cyccnt::CYCCNT, peripherals = true)]
 const APP: () = {
     struct Resources {
-        itm: ITM,
         sound_device: SoundDevice<'static>,
+        mp3_player: Mp3Player<'static>,
+        card_reader: SdCardReader<SpiType, hal::gpio::PXx<Output<PushPull>>>,
         pa4: gpioa::PA4<Analog>,
     }
-    #[init]
+    #[init(spawn=[play_intro])]
     fn init(cx: init::Context) -> init::LateResources {
         let mut core = cx.core;
-        let mut itm = core.ITM;
         core.DCB.enable_trace();
         core.DWT.enable_cycle_counter();
 
@@ -438,70 +588,118 @@ const APP: () = {
         let mut rcc = device.RCC.constrain();
         let clocks = init_clocks(rcc.cfgr, flash);
 
+        let logger: &Logger<InterruptSync> = unsafe {
+            LOGGER.replace(Logger {
+                inner: InterruptSync::new(destination::itm::Itm::new(core.ITM)),
+                level: log::LevelFilter::Trace,
+            });
+            LOGGER.as_ref().unwrap()
+        };
+        cortex_m_log::log::init(logger).expect("To set logger");
+
         let mut gpioa = device.GPIOA.split(&mut rcc.ahb);
         let pa4 = gpioa.pa4.into_analog(&mut gpioa.moder, &mut gpioa.pupdr);
 
-        let data_reader = DataReader::new(MP3_FILE);
+        let cs = gpioa
+            .pa1
+            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper)
+            .downgrade()
+            .downgrade();
+
+        let spi = init_spi(
+            device.SPI1,
+            gpioa.pa5,
+            gpioa.pa6,
+            gpioa.pa7,
+            &mut gpioa.moder,
+            &mut gpioa.afrl,
+            &mut rcc.apb2,
+            &clocks,
+            18.mhz(),
+        );
+
+        let card_reader = SdCardReader::new(spi, cs)
+            .map_err(|e| {
+                error!("Card reader init failed: {:?}", e);
+                e
+            })
+            .expect("To have a card reader");
+
         let buffers = unsafe { &mut BUFFERS };
         let ccram_buffers = unsafe { &mut CCRAM_BUFFERS };
-        let mp3_decoder: Mp3Decoder =
-            Mp3Decoder::new(&mut ccram_buffers.mp3_decoder_data, &mut buffers.pcm_buffer);
-
-        let mut sound_device = SoundDevice::new(
-            &mut buffers.dma_buffer,
-            mp3_decoder,
+        let mp3_player = Mp3Player::new(
             &mut buffers.mp3_data,
-            data_reader,
+            &mut ccram_buffers.mp3_decoder_data,
+            &mut buffers.pcm_buffer,
+        );
+
+        let sound_device = SoundDevice::new(
+            &mut buffers.dma_buffer,
             clocks.sysclk(),
             device.TIM2,
             device.DAC,
             device.DMA2,
         );
 
-        iprintln!(&mut itm.stim[0], "Init finished");
-        sound_device.fill_pcm_buffer(0, &mut itm);
-        sound_device.fill_pcm_buffer(1, &mut itm);
-        sound_device.start_playing();
-        iprintln!(&mut itm.stim[0], "Started playing");
+        info!("Init finished");
 
         init::LateResources {
-            itm,
             sound_device,
+            mp3_player,
+            card_reader,
             pa4,
         }
     }
 
-    #[idle(resources=[itm, sound_device])]
+    #[task(resources=[card_reader, sound_device, mp3_player])]
+    fn play_intro(cx: play_intro::Context) {
+        let mut card_reader = cx.resources.card_reader;
+        let mut sound_device = cx.resources.sound_device;
+        let mut mp3_player = cx.resources.mp3_player;
+        let play_result = card_reader.lock(|card_reader| {
+            sound_device.lock(|sound_device| {
+                mp3_player.lock(|mp3_player| {
+                    card_reader
+                        .open_intro()
+                        .map_err(|e| PlayError::FileError(e))
+                        .and_then(|song| {
+                            let file_name = song.file_name();
+                            mp3_player.play_song(song, card_reader, sound_device)?;
+                            Ok(file_name)
+                        })
+                })
+            })
+        });
+        match play_result {
+            Ok(file_name) => info!("Playing {}", file_name),
+            Err(e) => error!("Intro file can't be played: {:?}", e),
+        }
+    }
+
+    #[idle(resources=[sound_device])]
     fn idle(mut cx: idle::Context) -> ! {
         static mut TICK: Option<Instant> = None;
         static mut ALREADY_STOPPED: bool = false;
         TICK.replace(Instant::now());
-        cx.resources
-            .itm
-            .lock(|itm| iprintln!(&mut itm.stim[0], "idle"));
+        info!("idle");
         loop {
             if TICK.unwrap().elapsed().as_cycles() > 4_000_000 {
                 *TICK = Some(Instant::now());
                 let playing = cx.resources.sound_device.lock(|sd| sd.playing);
-                cx.resources.itm.lock(|itm| {
-                    if !playing && !*ALREADY_STOPPED {
-                        *ALREADY_STOPPED = true;
-                        iprintln!(&mut itm.stim[0], "Music stopped");
-                    }
-                });
+                if !playing && !*ALREADY_STOPPED {
+                    info!("Music stopped");
+                    *ALREADY_STOPPED = false
+                }
             }
         }
     }
 
-    #[task(capacity=1, priority=8, resources=[itm, sound_device])]
+    #[task(capacity=1, priority=8, resources=[ sound_device, mp3_player, card_reader])]
     fn process_dma_request(cx: process_dma_request::Context, new_state: DmaState) {
         match new_state {
             DmaState::Unknown => panic!("Unknown dma state"),
             DmaState::Error => {
-                iprintln!(
-                    &mut cx.resources.itm.stim[0],
-                    "Dma request error. Stop playing"
-                );
+                error!("Dma request error. Stop playing");
                 cx.resources.sound_device.stop_playing();
             }
             DmaState::HalfTrigger | DmaState::TriggerComplete => {
@@ -510,22 +708,28 @@ const APP: () = {
                 } else {
                     1
                 };
-                cx.resources
-                    .sound_device
-                    .fill_pcm_buffer(index, cx.resources.itm);
+                let fil_res = cx.resources.sound_device.fill_pcm_buffer(
+                    index,
+                    cx.resources.mp3_player,
+                    cx.resources.card_reader,
+                );
+                if fil_res.is_err() {
+                    cx.resources.sound_device.stop_playing();
+                }
             }
         }
     }
 
-    #[task(binds = DMA2_CH3, priority=8, resources=[sound_device, itm], spawn=[process_dma_request])]
+    #[task(binds = DMA2_CH3, priority=8, resources=[sound_device], spawn=[process_dma_request])]
     fn dma2_ch3(cx: dma2_ch3::Context) {
         let state = cx.resources.sound_device.dma_interrupt();
         if cx.spawn.process_dma_request(state).is_err() {
             cx.resources.sound_device.stop_playing();
-            iprintln!(&mut cx.resources.itm.stim[0], "Spawn error. Stop playing!");
+            error!("Spawn error. Stop playing!");
         }
     }
     extern "C" {
-        fn SPI1();
+        fn EXTI0();
+        fn EXTI1();
     }
 };

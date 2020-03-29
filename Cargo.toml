@@ -6,15 +6,18 @@ name = "rfid-audio"
 version = "0.1.0"
 
 [dependencies]
-cortex-m = "0.5.8"
+cortex-m = "0.6.1"
 cortex-m-semihosting = "0.3.3"
 cortex-m-rtfm = "0.5.1"
 embedded-mp3 = { version = "0.1.0", path = "../embedded-mp3" }
 panic-itm = "0.4.1"
+embedded-sdmmc = "0.3.0"
+log = {"version"="0.4.8", features=["max_level_trace", "release_max_level_warn"]}
+cortex-m-log = {"version"="0.6.1", features=["itm", "log-integration"]}
 
 [dependencies.stm32f3xx-hal]
 features = ["stm32f303xc", "rt"]
-version = "0.4.0"
+version = "0.4.1"
 
 # this lets you use `cargo fix`!
 [[bin]]
@@ -28,4 +31,4 @@ debug = true # symbols are nice and they don't increase the size on Flash
 lto = true # better optimizations
 
 [profile.dev]
-opt-level = 3
+opt-level = 0

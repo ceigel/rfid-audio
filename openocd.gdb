@@ -12,7 +12,7 @@ break HardFault
 break rust_begin_unwind
 
 # *try* to stop at the user entry point (it might be gone due to inlining)
-tb main.rs:328
+tb init
 
 # # send captured ITM to the file itm.fifo
 # # (the microcontroller SWO pin must be connected to the programmer SWO pin)
