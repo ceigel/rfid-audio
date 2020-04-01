@@ -11,7 +11,7 @@ use embedded_sdmmc as sdmmc;
 use hal::gpio::{gpioa, Analog, Floating, Input, Output, PushPull, AF5};
 use hal::hal as embedded_hal;
 use hal::spi::{Phase, Polarity, Spi};
-use log::{error, info};
+use log::{debug, error, info};
 use rtfm::app;
 use rtfm::cyccnt::Instant;
 use stm32f3xx_hal as hal;
@@ -20,7 +20,7 @@ use stm32f3xx_hal::stm32::Interrupt;
 use stm32f3xx_hal::{prelude::*, time};
 
 const DMA_LENGTH: usize = 2 * (mp3::MAX_SAMPLES_PER_FRAME / 2);
-const MP3_DATA_LENGTH: usize = 16384;
+const MP3_DATA_LENGTH: usize = 12 * 1024;
 const MP3_MAX_READ: usize = MP3_DATA_LENGTH / 8;
 static mut LOGGER: Option<Logger<InterruptSync>> = None;
 const INTRO_FILE_NAME: &str = "intro.mp3";
@@ -31,8 +31,8 @@ struct CCRamBuffers {
 
 struct Buffers {
     pub dma_buffer: [u16; DMA_LENGTH],
-    pub pcm_buffer: [i16; mp3::MAX_SAMPLES_PER_FRAME],
     pub mp3_data: [u8; MP3_DATA_LENGTH],
+    pub pcm_buffer: [i16; mp3::MAX_SAMPLES_PER_FRAME],
 }
 
 impl CCRamBuffers {
@@ -47,8 +47,8 @@ impl Buffers {
     pub const fn new() -> Self {
         Self {
             dma_buffer: [0; DMA_LENGTH],
-            pcm_buffer: [0; mp3::MAX_SAMPLES_PER_FRAME],
             mp3_data: [0; MP3_DATA_LENGTH],
+            pcm_buffer: [0; mp3::MAX_SAMPLES_PER_FRAME],
         }
     }
 }
@@ -225,16 +225,21 @@ impl<'a> Mp3Player<'a> {
             MP3_DATA_LENGTH
         };
         let to_read = max_read.min(write_end - self.write_index);
+        info!(
+            "Will read from card: {}..{}",
+            self.write_index,
+            to_read + self.write_index
+        );
         let out_slice = &mut self.mp3_data[self.write_index..to_read + self.write_index];
         let bytes_red = data_reader.read_data(file_reader, out_slice)?;
         if bytes_red < to_read {
             self.current_song.take();
         }
         self.set_last_frame(bytes_red + self.write_index);
+        self.write_index += bytes_red;
         if self.read_end < self.write_index {
             self.read_end = self.last_frame_index;
         }
-        self.write_index += bytes_red;
         if self.write_index == MP3_DATA_LENGTH {
             self.write_index = 0;
         }
@@ -277,18 +282,25 @@ impl<'a> Mp3Player<'a> {
         let mp3_buffer = &self.mp3_data[mp3_data_begin..mp3_data_end];
         let peek = self.decoder.peek(mp3_buffer);
         match peek {
-            mp3::DecodeResult::Successful(bytes, _) | mp3::DecodeResult::SkippedData(bytes) => {
+            mp3::DecodeResult::Successful(bytes, frame) => {
+                self.last_frame_rate.replace(frame.sample_rate.hz());
                 Some(bytes)
             }
+            mp3::DecodeResult::SkippedData(bytes) => Some(bytes),
+
             _ => None,
         }
     }
 
     pub fn next_frame(&mut self, dma_buffer: &mut [u16]) -> usize {
+        info!(
+            "Next frame: read_index: {}, read_end: {}, write_index: {}",
+            self.read_index, self.read_end, self.write_index
+        );
         fn advance_read_index(
-            offset: usize,
             read_index: &mut usize,
             read_end: &mut usize,
+            offset: usize,
             write_index: usize,
         ) {
             *read_index += offset;
@@ -307,13 +319,11 @@ impl<'a> Mp3Player<'a> {
         match decode_result {
             mp3::DecodeResult::Successful(bytes_read, frame) => {
                 advance_read_index(
-                    bytes_read,
                     &mut self.read_index,
                     &mut self.read_end,
+                    bytes_read,
                     self.write_index,
                 );
-                let freq = frame.sample_rate;
-                self.last_frame_rate.replace(freq.hz());
                 let samples = pcm_buffer
                     .iter()
                     .step_by(frame.channels as usize)
@@ -328,11 +338,12 @@ impl<'a> Mp3Player<'a> {
             }
             mp3::DecodeResult::SkippedData(skipped_data) => {
                 advance_read_index(
-                    skipped_data,
                     &mut self.read_index,
                     &mut self.read_end,
+                    skipped_data,
                     self.write_index,
                 );
+                info!("skipping: {}", skipped_data);
                 self.next_frame(dma_buffer)
             }
             mp3::DecodeResult::InsufficientData => 0,
@@ -389,6 +400,7 @@ impl<'a> SoundDevice<'a> {
         file_reader: &mut impl FileReader,
         freq: time::Hertz,
     ) -> Result<(), PlayError> {
+        info!("start playing");
         self.fill_pcm_buffer(0, mp3_player, file_reader)?;
         self.fill_pcm_buffer(1, mp3_player, file_reader)?;
         let arr = self.sysclk_freq.0 / freq.0;
@@ -632,6 +644,11 @@ const APP: () = {
             &mut ccram_buffers.mp3_decoder_data,
             &mut buffers.pcm_buffer,
         );
+        debug!(
+            "Size of buffers: ccram_buffers: {}, buffers: {}",
+            core::mem::size_of::<CCRamBuffers>(),
+            core::mem::size_of::<Buffers>()
+        );
 
         let sound_device = SoundDevice::new(
             &mut buffers.dma_buffer,
@@ -643,6 +660,7 @@ const APP: () = {
 
         info!("Init finished");
 
+        cx.spawn.play_intro().expect("To start play_intro");
         init::LateResources {
             sound_device,
             mp3_player,
@@ -688,7 +706,7 @@ const APP: () = {
                 let playing = cx.resources.sound_device.lock(|sd| sd.playing);
                 if !playing && !*ALREADY_STOPPED {
                     info!("Music stopped");
-                    *ALREADY_STOPPED = false
+                    *ALREADY_STOPPED = true
                 }
             }
         }
