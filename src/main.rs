@@ -21,7 +21,7 @@ use stm32f3xx_hal::{prelude::*, time};
 
 const DMA_LENGTH: usize = 2 * (mp3::MAX_SAMPLES_PER_FRAME / 2);
 const MP3_DATA_LENGTH: usize = 12 * 1024;
-const MP3_MAX_READ: usize = MP3_DATA_LENGTH / 8;
+const MP3_TRIGGER_MOVE: usize = (MP3_DATA_LENGTH / 3);
 static mut LOGGER: Option<Logger<InterruptSync>> = None;
 const INTRO_FILE_NAME: &str = "intro.mp3";
 
@@ -85,6 +85,13 @@ impl DataReader {
 
     pub fn file_name(&self) -> sdmmc::ShortFileName {
         self.file_name.clone()
+    }
+
+    pub fn done(&self) -> bool {
+        self.file.eof()
+    }
+    pub fn remaining(&self) -> u32 {
+        self.file.left()
     }
 }
 
@@ -157,9 +164,7 @@ pub enum PlayError {
 
 pub struct Mp3Player<'a> {
     read_index: usize,
-    read_end: usize,
     write_index: usize,
-    last_frame_index: usize,
     mp3_data: &'a mut [u8; MP3_DATA_LENGTH],
     decoder: mp3::Decoder<'a>,
     last_frame_rate: Option<time::Hertz>,
@@ -175,9 +180,7 @@ impl<'a> Mp3Player<'a> {
     ) -> Self {
         Self {
             read_index: 0,
-            read_end: 0,
             write_index: 0,
-            last_frame_index: 0,
             mp3_data,
             decoder: mp3::Decoder::new(decoder_data),
             pcm_buffer: pcm_buffer,
@@ -192,161 +195,114 @@ impl<'a> Mp3Player<'a> {
         file_reader: &mut impl FileReader,
         sound_device: &mut SoundDevice,
     ) -> Result<(), PlayError> {
+        info!("Playing intro, size {}", data_reader.remaining());
         self.current_song.replace(data_reader);
         self.init_buffer(file_reader)
             .map_err(|e| PlayError::FileError(e))?;
-        let last_frame_rate = self.last_frame_rate.ok_or(PlayError::NoValidMp3Frame)?;
-        sound_device.start_playing(self, file_reader, last_frame_rate)
+        sound_device.start_playing(self, file_reader)
     }
 
     pub fn fill_buffer(&mut self, file_reader: &mut impl FileReader) -> Result<(), FileError> {
-        self.fill_buffer_intern(file_reader, MP3_MAX_READ)
+        self.fill_buffer_intern(file_reader)
     }
 
     fn init_buffer(&mut self, file_reader: &mut impl FileReader) -> Result<(), FileError> {
-        self.fill_buffer_intern(file_reader, MP3_DATA_LENGTH)
+        self.fill_buffer_intern(file_reader)
     }
 
     pub fn fill_buffer_intern(
         &mut self,
         file_reader: &mut impl FileReader,
-        max_read: usize,
     ) -> Result<(), FileError> {
-        if !self.prepare_read() {
+        if self.current_song.as_ref().map_or(true, |song| song.done()) {
             return Ok(());
         }
-        let data_reader = self
-            .current_song
-            .as_mut()
-            .expect("prepare_read to have returned");
-        let write_end = if self.write_index < self.read_index {
-            self.read_index
+        if self.read_index < MP3_TRIGGER_MOVE && self.write_index == self.mp3_data.len() {
+            return Ok(()); //not enough space to read
+        }
+        if self.write_index == self.mp3_data.len() {
+            let copy_len = self.mp3_data.len() - self.read_index;
+            let from = self.mp3_data[self.read_index..].as_ptr();
+            let into = self.mp3_data[..].as_mut_ptr();
+            unsafe {
+                core::ptr::copy(from, into, copy_len);
+            }
+            self.read_index = 0;
+            self.write_index = copy_len;
         } else {
-            MP3_DATA_LENGTH
-        };
-        let to_read = max_read.min(write_end - self.write_index);
-        info!(
-            "Will read from card: {}..{}",
-            self.write_index,
-            to_read + self.write_index
-        );
-        let out_slice = &mut self.mp3_data[self.write_index..to_read + self.write_index];
-        let bytes_red = data_reader.read_data(file_reader, out_slice)?;
-        if bytes_red < to_read {
-            self.current_song.take();
-        }
-        self.set_last_frame(bytes_red + self.write_index);
-        self.write_index += bytes_red;
-        if self.read_end < self.write_index {
-            self.read_end = self.last_frame_index;
-        }
-        if self.write_index == MP3_DATA_LENGTH {
-            self.write_index = 0;
+            let data_reader = self
+                .current_song
+                .as_mut()
+                .expect("prepare_read to have returned");
+            debug!(
+                "Will read from card: {}..{}",
+                self.write_index,
+                self.mp3_data.len()
+            );
+            let out_slice = &mut self.mp3_data[self.write_index..];
+            let bytes_red = data_reader.read_data(file_reader, out_slice)?;
+            debug!(
+                "Read {}, Remaining {} bytes",
+                bytes_red,
+                data_reader.remaining()
+            );
+            self.write_index += bytes_red;
         }
         Ok(())
     }
 
-    fn prepare_read(&mut self) -> bool {
-        if self.current_song.is_none() {
-            return false;
-        }
-        if self.write_index < self.read_index && self.read_index - self.write_index < MP3_MAX_READ {
-            return false; //not enough space to read
-        }
-        if self.write_index == 0 && self.read_index >= MP3_MAX_READ {
-            let uncomplete_len = MP3_DATA_LENGTH - self.last_frame_index;
-            let (left, right) = self.mp3_data.split_at_mut(self.last_frame_index);
-            left[0..uncomplete_len].copy_from_slice(right);
-            self.write_index = uncomplete_len;
-            self.last_frame_index = 0;
-        } //else (self.read_index < self.write_index) can read
-        return true;
-    }
-
-    fn set_last_frame(&mut self, end_index: usize) {
-        loop {
-            let (begin, end) = (self.last_frame_index, end_index);
-            let frame_size = self.next_frame_size(begin, end);
-            if let Some(bytes) = frame_size {
-                if bytes + self.last_frame_index > end_index {
-                    break;
-                }
-                self.last_frame_index += bytes;
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn next_frame_size(&mut self, mp3_data_begin: usize, mp3_data_end: usize) -> Option<usize> {
-        let mp3_buffer = &self.mp3_data[mp3_data_begin..mp3_data_end];
-        let peek = self.decoder.peek(mp3_buffer);
-        match peek {
-            mp3::DecodeResult::Successful(bytes, frame) => {
-                self.last_frame_rate.replace(frame.sample_rate.hz());
-                Some(bytes)
-            }
-            mp3::DecodeResult::SkippedData(bytes) => Some(bytes),
-
-            _ => None,
-        }
-    }
-
     pub fn next_frame(&mut self, dma_buffer: &mut [u16]) -> usize {
-        info!(
-            "Next frame: read_index: {}, read_end: {}, write_index: {}",
-            self.read_index, self.read_end, self.write_index
+        debug!(
+            "Next frame: read_index: {}, write_index: {}",
+            self.read_index, self.write_index
         );
-        fn advance_read_index(
-            read_index: &mut usize,
-            read_end: &mut usize,
-            offset: usize,
-            write_index: usize,
-        ) {
-            *read_index += offset;
-            if write_index < *read_index && *read_index == *read_end {
-                *read_index = 0;
-                *read_end = write_index;
-            }
-        }
-
-        let mp3: &[u8] = &self.mp3_data[self.read_index..self.read_end];
+        let mp3: &[u8] = &self.mp3_data[self.read_index..self.write_index];
         if mp3.len() == 0 {
             return 0;
         }
         let pcm_buffer = &mut self.pcm_buffer;
         let decode_result = self.decoder.decode(mp3, pcm_buffer);
-        match decode_result {
-            mp3::DecodeResult::Successful(bytes_read, frame) => {
-                advance_read_index(
-                    &mut self.read_index,
-                    &mut self.read_end,
-                    bytes_read,
-                    self.write_index,
-                );
-                let samples = pcm_buffer
-                    .iter()
-                    .step_by(frame.channels as usize)
-                    .take(frame.sample_count as usize)
-                    .map(|sample| ((*sample as i32) - (core::i16::MIN as i32)) as u16 >> 4);
-                let mut index: usize = 0;
-                for val in samples {
-                    dma_buffer[index] = val;
-                    index += 1;
+        loop {
+            match decode_result {
+                mp3::DecodeResult::Successful(bytes_read, frame) => {
+                    debug!(
+                        "Decoding successful: {} read_index: {}",
+                        bytes_read, self.read_index
+                    );
+                    self.last_frame_rate.replace(frame.sample_rate.hz());
+                    self.read_index += bytes_read;
+                    let samples = pcm_buffer
+                        .iter()
+                        .step_by(frame.channels as usize)
+                        .take(frame.sample_count as usize)
+                        .map(|sample| ((*sample as i32) - (core::i16::MIN as i32)) as u16 >> 4);
+                    let mut index: usize = 0;
+                    for val in samples {
+                        dma_buffer[index] = val;
+                        index += 1;
+                    }
+                    return index;
                 }
-                index
+                mp3::DecodeResult::SkippedData(skipped_data) => {
+                    debug!("Skipping: {} read_index: {}", skipped_data, self.read_index);
+                    match self.read_index.checked_add(skipped_data) {
+                        Some(new_val) => {
+                            if new_val >= self.write_index {
+                                error!("Skipped data outside buffer. read_index: {}, write_index: {}, skipped_data: {}", self.read_index, self.write_index, skipped_data);
+                                return 0;
+                            }
+                            self.read_index = new_val;
+                        }
+                        None => {
+                            error!("Skipped data overflowed read_index add. read_index: {}, skipped_data: {}", self.read_index, skipped_data);
+                            return 0;
+                        }
+                    }
+                }
+                mp3::DecodeResult::InsufficientData => {
+                    return 0;
+                }
             }
-            mp3::DecodeResult::SkippedData(skipped_data) => {
-                advance_read_index(
-                    &mut self.read_index,
-                    &mut self.read_end,
-                    skipped_data,
-                    self.write_index,
-                );
-                info!("skipping: {}", skipped_data);
-                self.next_frame(dma_buffer)
-            }
-            mp3::DecodeResult::InsufficientData => 0,
         }
     }
 }
@@ -398,11 +354,13 @@ impl<'a> SoundDevice<'a> {
         &mut self,
         mp3_player: &mut Mp3Player,
         file_reader: &mut impl FileReader,
-        freq: time::Hertz,
     ) -> Result<(), PlayError> {
         info!("start playing");
         self.fill_pcm_buffer(0, mp3_player, file_reader)?;
         self.fill_pcm_buffer(1, mp3_player, file_reader)?;
+        let freq = mp3_player
+            .last_frame_rate
+            .ok_or(PlayError::NoValidMp3Frame)?;
         let arr = self.sysclk_freq.0 / freq.0;
         self.tim2.arr.write(|w| w.arr().bits(arr));
         self.tim2.cr1.modify(|_, w| w.cen().enabled());
@@ -603,7 +561,7 @@ const APP: () = {
         let logger: &Logger<InterruptSync> = unsafe {
             LOGGER.replace(Logger {
                 inner: InterruptSync::new(destination::itm::Itm::new(core.ITM)),
-                level: log::LevelFilter::Trace,
+                level: log::LevelFilter::Info,
             });
             LOGGER.as_ref().unwrap()
         };
