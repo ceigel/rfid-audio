@@ -19,10 +19,12 @@ use stm32f3xx_hal::stm32 as stm32f303;
 use stm32f3xx_hal::stm32::Interrupt;
 use stm32f3xx_hal::{prelude::*, time};
 
+static mut LOGGER: Option<Logger<InterruptSync>> = None;
+const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Info;
+
 const DMA_LENGTH: usize = 2 * (mp3::MAX_SAMPLES_PER_FRAME / 2);
 const MP3_DATA_LENGTH: usize = 12 * 1024;
-const MP3_TRIGGER_MOVE: usize = (MP3_DATA_LENGTH / 3);
-static mut LOGGER: Option<Logger<InterruptSync>> = None;
+const MP3_TRIGGER_MOVE: usize = 2 * 1024;
 const INTRO_FILE_NAME: &str = "intro.mp3";
 
 struct CCRamBuffers {
@@ -93,6 +95,9 @@ impl DataReader {
     pub fn remaining(&self) -> u32 {
         self.file.left()
     }
+    pub fn seek_from_start(&mut self, offset: u32) -> Result<(), ()> {
+        self.file.seek_from_start(offset)
+    }
 }
 
 pub trait FileReader {
@@ -159,6 +164,7 @@ where
 #[derive(Debug)]
 pub enum PlayError {
     FileError(FileError),
+    NotAnMp3,
     NoValidMp3Frame,
 }
 
@@ -197,23 +203,57 @@ impl<'a> Mp3Player<'a> {
     ) -> Result<(), PlayError> {
         info!("Playing intro, size {}", data_reader.remaining());
         self.current_song.replace(data_reader);
-        self.init_buffer(file_reader)
-            .map_err(|e| PlayError::FileError(e))?;
+        self.skip_id3v2_header(file_reader)?;
+        self.init_buffer(file_reader)?;
         sound_device.start_playing(self, file_reader)
     }
 
-    pub fn fill_buffer(&mut self, file_reader: &mut impl FileReader) -> Result<(), FileError> {
+    fn skip_id3v2_header(&mut self, file_reader: &mut impl FileReader) -> Result<(), PlayError> {
+        const MP3_DETECT_SIZE: usize = 10;
+        let data_reader = self
+            .current_song
+            .as_mut()
+            .expect("prepare_read to have returned");
+        let buf = &mut self.mp3_data[0..MP3_DETECT_SIZE];
+        let bytes_red = data_reader
+            .read_data(file_reader, buf)
+            .map_err(|e| PlayError::FileError(e))?;
+        if bytes_red != MP3_DETECT_SIZE
+            || &buf[0..3] != "ID3".as_bytes()
+            || (buf[5] & 0x0f != 0/* only first 4 bits of flags are available */)
+            || (buf[6] & 0x80 != 0/* size(synchInteger), first bit 0 */)
+            || (buf[7] & 0x80 != 0/* size(synchInteger), first bit 0 */)
+            || (buf[8] & 0x80 != 0/* size(synchInteger), first bit 0 */)
+            || (buf[9] & 0x80 != 0/* size(synchInteger), first bit 0 */)
+        {
+            return Err(PlayError::NotAnMp3);
+        }
+        let mut id3v2size: u32 = (((buf[6] as u32 & 0x7f) << 21)
+            | ((buf[7] as u32 & 0x7f) << 14)
+            | ((buf[8] as u32 & 0x7f) << 7)
+            | (buf[9] as u32 & 0x7f))
+            + 10;
+        if buf[5] & 0x10 != 0 {
+            id3v2size += 10;
+        }
+        debug!("ID3V2 size is {}", id3v2size);
+        data_reader
+            .seek_from_start(id3v2size)
+            .map_err(|_| PlayError::NotAnMp3)
+    }
+
+    pub fn fill_buffer(&mut self, file_reader: &mut impl FileReader) -> Result<(), PlayError> {
         self.fill_buffer_intern(file_reader)
     }
 
-    fn init_buffer(&mut self, file_reader: &mut impl FileReader) -> Result<(), FileError> {
+    fn init_buffer(&mut self, file_reader: &mut impl FileReader) -> Result<(), PlayError> {
         self.fill_buffer_intern(file_reader)
     }
 
     pub fn fill_buffer_intern(
         &mut self,
         file_reader: &mut impl FileReader,
-    ) -> Result<(), FileError> {
+    ) -> Result<(), PlayError> {
         if self.current_song.as_ref().map_or(true, |song| song.done()) {
             return Ok(());
         }
@@ -240,7 +280,9 @@ impl<'a> Mp3Player<'a> {
                 self.mp3_data.len()
             );
             let out_slice = &mut self.mp3_data[self.write_index..];
-            let bytes_red = data_reader.read_data(file_reader, out_slice)?;
+            let bytes_red = data_reader
+                .read_data(file_reader, out_slice)
+                .map_err(|e| PlayError::FileError(e))?;
             debug!(
                 "Read {}, Remaining {} bytes",
                 bytes_red,
@@ -396,9 +438,7 @@ impl<'a> SoundDevice<'a> {
             }
             Ok(())
         } else {
-            mp3_player
-                .fill_buffer(file_reader)
-                .map_err(|e| PlayError::FileError(e))
+            mp3_player.fill_buffer(file_reader)
         }
     }
 
@@ -561,7 +601,7 @@ const APP: () = {
         let logger: &Logger<InterruptSync> = unsafe {
             LOGGER.replace(Logger {
                 inner: InterruptSync::new(destination::itm::Itm::new(core.ITM)),
-                level: log::LevelFilter::Info,
+                level: LOG_LEVEL,
             });
             LOGGER.as_ref().unwrap()
         };
@@ -664,6 +704,7 @@ const APP: () = {
                 let playing = cx.resources.sound_device.lock(|sd| sd.playing);
                 if !playing && !*ALREADY_STOPPED {
                     info!("Music stopped");
+                    log::logger().flush();
                     *ALREADY_STOPPED = true
                 }
             }
