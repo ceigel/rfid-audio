@@ -17,7 +17,7 @@ cortex-m-log = {"version"="0.6.1", features=["itm", "log-integration"]}
 
 [dependencies.stm32f3xx-hal]
 features = ["stm32f303xc", "rt"]
-version = "0.4.1"
+version = "0.4.2"
 
 # this lets you use `cargo fix`!
 [[bin]]
