@@ -1,12 +1,15 @@
 use crate::data_reader::FileReader;
 use crate::mp3_player::{Mp3Player, PlayError};
-use log::info;
+use cast::{u16, u32};
+use log::{debug, error, info};
 use stm32f3xx_hal::stm32 as stm32f303;
 use stm32f3xx_hal::stm32::Interrupt;
 use stm32f3xx_hal::time;
 
 pub(crate) const DMA_LENGTH: usize = 2 * (mp3::MAX_SAMPLES_PER_FRAME / 2);
-fn apb1enr() -> &'static stm32f303::rcc::APB1ENR {
+const PLAYING_DONE_DELAY: u16 = 4_000; // ms
+
+pub fn apb1enr() -> &'static stm32f303::rcc::APB1ENR {
     unsafe { &(*stm32f303::RCC::ptr()).apb1enr }
 }
 
@@ -18,10 +21,15 @@ fn enable_dma2_ch3_interrupt() {
     unsafe { stm32f303::NVIC::unmask(Interrupt::DMA2_CH3) };
 }
 
+fn enable_tim7_interrupt() {
+    unsafe { stm32f303::NVIC::unmask(Interrupt::TIM7) };
+}
+
 #[derive(PartialEq, Debug)]
 pub enum DmaState {
     HalfTrigger,
     TriggerComplete,
+    Stopped,
     Error,
     Unknown,
 }
@@ -32,8 +40,9 @@ pub struct SoundDevice<'a> {
     dma2: stm32f303::DMA2,
     dac: stm32f303::DAC,
     tim2: stm32f303::TIM2,
+    tim7: stm32f303::TIM7,
     sysclk_freq: time::Hertz,
-    pub playing: bool,
+    pub stopping: bool,
 }
 
 impl<'a> SoundDevice<'a> {
@@ -41,6 +50,7 @@ impl<'a> SoundDevice<'a> {
         dma_buffer: &'a mut [u16; DMA_LENGTH],
         sysclk: time::Hertz,
         tim2: stm32f303::TIM2,
+        tim7: stm32f303::TIM7,
         dac: stm32f303::DAC,
         dma2: stm32f303::DMA2,
     ) -> Self {
@@ -50,12 +60,14 @@ impl<'a> SoundDevice<'a> {
             dma_buffer,
             stop_at_buffer_len: None,
             tim2,
+            tim7,
             dma2,
             dac,
             sysclk_freq: sysclk,
-            playing: false,
+            stopping: false,
         };
         obj.init_tim2(apb1enr);
+        obj.init_tim7(apb1enr);
         obj.init_dac1(apb1enr);
         obj.init_dma2(ahbenr);
         obj
@@ -76,14 +88,8 @@ impl<'a> SoundDevice<'a> {
         self.tim2.arr.write(|w| w.arr().bits(arr));
         self.tim2.cr1.modify(|_, w| w.cen().enabled());
         self.dma2.ch3.cr.modify(|_, w| w.en().enabled());
-        self.playing = true;
+        self.stopping = false;
         Ok(())
-    }
-
-    pub fn stop_playing(&mut self) {
-        self.tim2.cr1.modify(|_, w| w.cen().disabled());
-        self.dma2.ch3.cr.modify(|_, w| w.en().disabled());
-        self.playing = false
     }
 
     pub fn fill_pcm_buffer(
@@ -100,10 +106,15 @@ impl<'a> SoundDevice<'a> {
         };
         let filled = mp3_player.next_frame(dma_buffer_slice);
         if filled < buffer_len / 2 {
-            info!("Finishing music {}, {}", buffer_index, filled);
-            self.stop_at_buffer_len = Some(filled as u16);
+            let filled = (filled + buffer_index * (buffer_len / 2)) as u16;
+            info!(
+                "Finishing music buffer_index: {}, filled:{}",
+                buffer_index, filled
+            );
+            self.stop_at_buffer_len = Some(filled);
             if buffer_index == 1 {
                 self.set_dma_stop();
+                debug!("Set dma stop");
             }
             Ok(())
         } else {
@@ -117,8 +128,10 @@ impl<'a> SoundDevice<'a> {
         let isr = self.dma2.isr.read();
 
         // clear interrupt flag and return dma state
-        let state = if isr.teif3().is_error() {
+        let mut state = if isr.teif3().is_error() {
             self.dma2.ifcr.write(|w| w.cteif3().clear());
+            error!("Dma request error. Stop playing");
+            self.stop_playing();
             DmaState::Error
         } else if isr.htif3().is_half() {
             self.dma2.ifcr.write(|w| w.chtif3().clear());
@@ -130,28 +143,59 @@ impl<'a> SoundDevice<'a> {
             DmaState::Unknown
         };
 
-        if state == DmaState::TriggerComplete && self.playing {
+        if !self.stopping
+            && self.stop_at_buffer_len.is_some()
+            && (state == DmaState::TriggerComplete || state == DmaState::HalfTrigger)
+        {
             self.set_dma_stop();
+            state = DmaState::Stopped;
         }
-
         state
     }
 
-    fn set_dma_stop(&mut self) {
-        if let Some(stop_index) = self.stop_at_buffer_len {
-            self.dma2.ch3.cr.modify(|_, w| w.en().disabled());
-            self.dma2.ch3.ndtr.write(|w| w.ndt().bits(stop_index));
-            self.dma2.ch3.cr.write(|w| {
-                w.circ().disabled() // dma mode is circular
-            });
-            self.dma2.ch3.cr.modify(|_, w| w.en().enabled());
-            self.playing = false;
-        }
+    pub fn playing_stop_timer_interrupt(&self) {
+        self.tim7.sr.write(|w| w.uif().clear_bit());
+        self.stop_playing();
+    }
+
+    pub fn stop_playing(&self) {
+        debug!("Stop playing");
+        self.tim2.cr1.modify(|_, w| w.cen().disabled());
+        self.dma2.ch3.cr.modify(|_, w| w.en().disabled());
+    }
+
+    pub fn set_dma_stop(&mut self) {
+        let stop_index = self.stop_at_buffer_len.expect("To have stop_index set");
+        self.stopping = true;
+        self.dma2.ch3.cr.modify(|_, w| w.en().disabled());
+        self.dma2.ch3.ndtr.write(|w| w.ndt().bits(stop_index));
+        self.dma2.ch3.cr.modify(|_, w| {
+            w.circ().disabled() // dma mode is circular
+        });
+        self.dma2.ch3.cr.modify(|_, w| w.en().enabled());
+        self.trigger_playing_stop_timer();
     }
 
     fn init_tim2(&self, apb1enr: &stm32f303::rcc::APB1ENR) {
         apb1enr.modify(|_, w| w.tim2en().set_bit());
         self.tim2.cr2.write(|w| w.mms().update());
+    }
+
+    fn init_tim7(&self, apb1enr: &stm32f303::rcc::APB1ENR) {
+        apb1enr.modify(|_, w| w.tim7en().set_bit());
+        let psc_ms = u16((self.sysclk_freq.0 / 7200) - 1).unwrap();
+        let arr = PLAYING_DONE_DELAY / 7;
+        self.tim7.psc.write(|w| w.psc().bits(psc_ms));
+        self.tim7.arr.write(|w| unsafe { w.bits(u32(arr)) });
+        self.tim7.cr1.write(|w| w.opm().enabled().cen().clear_bit());
+        self.tim7.egr.write(|w| w.ug().update());
+        self.tim7.sr.modify(|_, w| w.uif().clear());
+        self.tim7.dier.write(|w| w.uie().enabled());
+        enable_tim7_interrupt();
+    }
+
+    fn trigger_playing_stop_timer(&self) {
+        self.tim7.cr1.modify(|_, w| w.cen().enabled());
     }
 
     fn init_dac1(&self, apb1enr: &stm32f303::rcc::APB1ENR) {

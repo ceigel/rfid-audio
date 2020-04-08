@@ -24,7 +24,7 @@ use stm32f3xx_hal as hal;
 use stm32f3xx_hal::prelude::*;
 
 static mut LOGGER: Option<Logger<InterruptSync>> = None;
-const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Info;
+const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Debug;
 
 const MP3_DATA_LENGTH: usize = 12 * 1024;
 const INTRO_FILE_NAME: &str = "intro.mp3";
@@ -177,6 +177,7 @@ const APP: () = {
             &mut buffers.dma_buffer,
             clocks.sysclk(),
             device.TIM2,
+            device.TIM7,
             device.DAC,
             device.DMA2,
         );
@@ -226,8 +227,8 @@ const APP: () = {
         loop {
             if TICK.unwrap().elapsed().as_cycles() > 4_000_000 {
                 *TICK = Some(Instant::now());
-                let playing = cx.resources.sound_device.lock(|sd| sd.playing);
-                if !playing && !*ALREADY_STOPPED {
+                let stopping = cx.resources.sound_device.lock(|sd| sd.stopping);
+                if stopping && !*ALREADY_STOPPED {
                     info!("Music stopped");
                     log::logger().flush();
                     *ALREADY_STOPPED = true
@@ -236,14 +237,10 @@ const APP: () = {
         }
     }
 
-    #[task(capacity=1, priority=8, resources=[ sound_device, mp3_player, card_reader])]
+    #[task(capacity=1, priority=8, resources=[sound_device, mp3_player, card_reader])]
     fn process_dma_request(cx: process_dma_request::Context, new_state: DmaState) {
         match new_state {
             DmaState::Unknown => panic!("Unknown dma state"),
-            DmaState::Error => {
-                error!("Dma request error. Stop playing");
-                cx.resources.sound_device.stop_playing();
-            }
             DmaState::HalfTrigger | DmaState::TriggerComplete => {
                 let index = if new_state == DmaState::HalfTrigger {
                     0
@@ -259,6 +256,7 @@ const APP: () = {
                     cx.resources.sound_device.stop_playing();
                 }
             }
+            _ => {}
         }
     }
 
@@ -266,10 +264,18 @@ const APP: () = {
     fn dma2_ch3(cx: dma2_ch3::Context) {
         let state = cx.resources.sound_device.dma_interrupt();
         if cx.spawn.process_dma_request(state).is_err() {
-            cx.resources.sound_device.stop_playing();
             error!("Spawn error. Stop playing!");
         }
     }
+
+    #[task(binds = TIM7, priority=1, resources=[sound_device])]
+    fn tim7(mut cx: tim7::Context) {
+        debug!("Tim7 called");
+        cx.resources
+            .sound_device
+            .lock(|sound_device| sound_device.playing_stop_timer_interrupt());
+    }
+
     extern "C" {
         fn EXTI0();
         fn EXTI1();

@@ -47,7 +47,11 @@ impl<'a> Mp3Player<'a> {
         file_reader: &mut impl FileReader,
         sound_device: &mut SoundDevice,
     ) -> Result<(), PlayError> {
-        info!("Playing intro, size {}", data_reader.remaining());
+        info!(
+            "Playing song {}, size {}",
+            data_reader.file_name(),
+            data_reader.remaining()
+        );
         self.current_song.replace(data_reader);
         self.skip_id3v2_header(file_reader)?;
         self.init_buffer(file_reader)?;

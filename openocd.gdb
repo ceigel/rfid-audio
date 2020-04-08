@@ -11,7 +11,8 @@ set backtrace limit 32
 break HardFault
 #break rust_begin_unwind
 
-
+break sound_device.rs:194
+#break main.rs:273
 #break minimp3.h:1706
 # *try* to stop at the user entry point (it might be gone due to inlining)
 
