@@ -6,8 +6,10 @@ use panic_itm as _;
 
 mod data_reader;
 mod mp3_player;
+mod playlist;
 mod sound_device;
 use data_reader::SdCardReader;
+use playlist::Playlist;
 use sound_device::{DmaState, SoundDevice, DMA_LENGTH};
 
 use cortex_m_log::destination;
@@ -27,7 +29,6 @@ static mut LOGGER: Option<Logger<InterruptSync>> = None;
 const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Debug;
 
 const MP3_DATA_LENGTH: usize = 12 * 1024;
-const INTRO_FILE_NAME: &str = "intro.mp3";
 
 struct CCRamBuffers {
     pub mp3_decoder_data: mp3::DecoderData,
@@ -103,15 +104,21 @@ fn init_spi(
     spi
 }
 
+pub struct PlayingResources {
+    pub sound_device: SoundDevice<'static>,
+    pub mp3_player: Mp3Player<'static>,
+    pub card_reader: SdCardReader<SpiType, hal::gpio::PXx<Output<PushPull>>>,
+}
+
 #[app(device = stm32f3xx_hal::stm32, monotonic = rtfm::cyccnt::CYCCNT, peripherals = true)]
 const APP: () = {
     struct Resources {
-        sound_device: SoundDevice<'static>,
-        mp3_player: Mp3Player<'static>,
-        card_reader: SdCardReader<SpiType, hal::gpio::PXx<Output<PushPull>>>,
+        playing_resources: PlayingResources,
         pa4: gpioa::PA4<Analog>,
+        #[init(None)]
+        current_playlist: Option<Playlist>,
     }
-    #[init(spawn=[play_intro])]
+    #[init(spawn=[start_playlist])]
     fn init(cx: init::Context) -> init::LateResources {
         let mut core = cx.core;
         core.DCB.enable_trace();
@@ -184,33 +191,79 @@ const APP: () = {
 
         info!("Init finished");
 
-        cx.spawn.play_intro().expect("To start play_intro");
+        cx.spawn.start_playlist("02").expect("To start play_intro");
         init::LateResources {
-            sound_device,
-            mp3_player,
-            card_reader,
+            playing_resources: PlayingResources {
+                sound_device,
+                mp3_player,
+                card_reader,
+            },
             pa4,
         }
     }
 
-    #[task(resources=[card_reader, sound_device, mp3_player])]
-    fn play_intro(cx: play_intro::Context) {
-        let mut card_reader = cx.resources.card_reader;
-        let mut sound_device = cx.resources.sound_device;
-        let mut mp3_player = cx.resources.mp3_player;
-        let play_result = card_reader.lock(|card_reader| {
-            sound_device.lock(|sound_device| {
-                mp3_player.lock(|mp3_player| {
-                    card_reader
-                        .open_file(INTRO_FILE_NAME)
-                        .map_err(|e| PlayError::FileError(e))
-                        .and_then(|song| {
+    #[task(resources=[playing_resources, current_playlist], spawn=[playlist_next])]
+    fn start_playlist(mut cx: start_playlist::Context, directory_name: &'static str) {
+        let currently_playing = cx.resources.current_playlist.is_some();
+        let next_playlist = cx.resources.playing_resources.lock(|pr| {
+            if currently_playing {
+                pr.sound_device.stop_playing();
+            }
+            pr.card_reader.open_directory(directory_name)
+        });
+        match next_playlist {
+            Ok(playlist) => {
+                if cx.resources.current_playlist.replace(playlist).is_none() {
+                    cx.spawn.playlist_next().expect("to spawn playlist next");
+                }
+            }
+            Err(e) => {
+                error!("Can not open directory: {}, err: {:?}", directory_name, e);
+            }
+        }
+    }
+
+    #[task(resources=[playing_resources, current_playlist])]
+    fn playlist_next(mut cx: playlist_next::Context) {
+        if let Some(playlist) = cx.resources.current_playlist {
+            let play_result = cx.resources.playing_resources.lock(|pr| {
+                playlist
+                    .move_next(&mut pr.card_reader)
+                    .map_err(|e| PlayError::from(e))
+                    .and_then(|song| match song {
+                        None => Ok(None),
+                        Some(song) => {
                             let file_name = song.file_name();
-                            mp3_player.play_song(song, card_reader, sound_device)?;
-                            Ok(file_name)
-                        })
+                            pr.mp3_player.play_song(
+                                song,
+                                &mut pr.card_reader,
+                                &mut pr.sound_device,
+                            )?;
+                            Ok(Some(file_name))
+                        }
+                    })
+            });
+            match play_result {
+                Ok(file_name) => info!("Playing {:?}", file_name),
+                Err(e) => error!("Playlist {} can't be played: {:?}", playlist.name(), e),
+            }
+        }
+    }
+
+    #[task(resources=[playing_resources])]
+    fn play_intro(mut cx: play_intro::Context) {
+        let play_result = cx.resources.playing_resources.lock(|pr| {
+            let card_reader = &mut pr.card_reader;
+            let sound_device = &mut pr.sound_device;
+            let mp3_player = &mut pr.mp3_player;
+            card_reader
+                .open_file("intro.mp3")
+                .map_err(|e| PlayError::FileError(e))
+                .and_then(|song| {
+                    let file_name = song.file_name();
+                    mp3_player.play_song(song, card_reader, sound_device)?;
+                    Ok(file_name)
                 })
-            })
         });
         match play_result {
             Ok(file_name) => info!("Playing {}", file_name),
@@ -218,7 +271,7 @@ const APP: () = {
         }
     }
 
-    #[idle(resources=[sound_device])]
+    #[idle(resources=[playing_resources])]
     fn idle(mut cx: idle::Context) -> ! {
         static mut TICK: Option<Instant> = None;
         static mut ALREADY_STOPPED: bool = false;
@@ -227,7 +280,10 @@ const APP: () = {
         loop {
             if TICK.unwrap().elapsed().as_cycles() > 4_000_000 {
                 *TICK = Some(Instant::now());
-                let stopping = cx.resources.sound_device.lock(|sd| sd.stopping);
+                let stopping = cx
+                    .resources
+                    .playing_resources
+                    .lock(|pr| pr.sound_device.stopping);
                 if stopping && !*ALREADY_STOPPED {
                     info!("Music stopped");
                     log::logger().flush();
@@ -237,8 +293,9 @@ const APP: () = {
         }
     }
 
-    #[task(capacity=1, priority=8, resources=[sound_device, mp3_player, card_reader])]
+    #[task(capacity=1, priority=8, resources=[playing_resources])]
     fn process_dma_request(cx: process_dma_request::Context, new_state: DmaState) {
+        let pr = cx.resources.playing_resources;
         match new_state {
             DmaState::Unknown => panic!("Unknown dma state"),
             DmaState::HalfTrigger | DmaState::TriggerComplete => {
@@ -247,33 +304,33 @@ const APP: () = {
                 } else {
                     1
                 };
-                let fil_res = cx.resources.sound_device.fill_pcm_buffer(
-                    index,
-                    cx.resources.mp3_player,
-                    cx.resources.card_reader,
-                );
+                let fil_res =
+                    pr.sound_device
+                        .fill_pcm_buffer(index, &mut pr.mp3_player, &mut pr.card_reader);
                 if fil_res.is_err() {
-                    cx.resources.sound_device.stop_playing();
+                    pr.sound_device.stop_playing();
                 }
             }
             _ => {}
         }
     }
 
-    #[task(binds = DMA2_CH3, priority=8, resources=[sound_device], spawn=[process_dma_request])]
+    #[task(binds = DMA2_CH3, priority=8, resources=[playing_resources], spawn=[process_dma_request])]
     fn dma2_ch3(cx: dma2_ch3::Context) {
-        let state = cx.resources.sound_device.dma_interrupt();
+        let pr = cx.resources.playing_resources;
+        let state = pr.sound_device.dma_interrupt();
         if cx.spawn.process_dma_request(state).is_err() {
             error!("Spawn error. Stop playing!");
         }
     }
 
-    #[task(binds = TIM7, priority=1, resources=[sound_device])]
+    #[task(binds = TIM7, priority=1, resources=[playing_resources], spawn=[playlist_next])]
     fn tim7(mut cx: tim7::Context) {
-        debug!("Tim7 called");
-        cx.resources
-            .sound_device
-            .lock(|sound_device| sound_device.playing_stop_timer_interrupt());
+        debug!("Tim7 called, now: {:?}", Instant::now());
+        cx.resources.playing_resources.lock(|pr| {
+            pr.sound_device.playing_stop_timer_interrupt();
+        });
+        cx.spawn.playlist_next().unwrap();
     }
 
     extern "C" {

@@ -2,15 +2,20 @@ use crate::data_reader::FileReader;
 use crate::mp3_player::{Mp3Player, PlayError};
 use cast::{u16, u32};
 use log::{debug, error, info};
+use rtfm::cyccnt::Instant;
 use stm32f3xx_hal::stm32 as stm32f303;
 use stm32f3xx_hal::stm32::Interrupt;
 use stm32f3xx_hal::time;
 
 pub(crate) const DMA_LENGTH: usize = 2 * (mp3::MAX_SAMPLES_PER_FRAME / 2);
-const PLAYING_DONE_DELAY: u16 = 4_000; // ms
+const PLAYING_DONE_DELAY: u16 = 2_000; // ms
 
 pub fn apb1enr() -> &'static stm32f303::rcc::APB1ENR {
     unsafe { &(*stm32f303::RCC::ptr()).apb1enr }
+}
+
+pub fn apb1rstr() -> &'static stm32f303::rcc::APB1RSTR {
+    unsafe { &(*stm32f303::RCC::ptr()).apb1rstr }
 }
 
 fn ahbenr() -> &'static stm32f303::rcc::AHBENR {
@@ -66,8 +71,9 @@ impl<'a> SoundDevice<'a> {
             sysclk_freq: sysclk,
             stopping: false,
         };
-        obj.init_tim2(apb1enr);
-        obj.init_tim7(apb1enr);
+        let apb1rstr = apb1rstr();
+        obj.init_tim2(apb1enr, apb1rstr);
+        obj.init_tim7(apb1enr, apb1rstr);
         obj.init_dac1(apb1enr);
         obj.init_dma2(ahbenr);
         obj
@@ -108,11 +114,13 @@ impl<'a> SoundDevice<'a> {
         if filled < buffer_len / 2 {
             let filled = (filled + buffer_index * (buffer_len / 2)) as u16;
             info!(
-                "Finishing music buffer_index: {}, filled:{}",
-                buffer_index, filled
+                "Finishing music buffer_index: {}, filled:{}, now: {:?}",
+                buffer_index,
+                filled,
+                Instant::now()
             );
             self.stop_at_buffer_len = Some(filled);
-            if buffer_index == 1 {
+            if buffer_index == 1 || filled == 0 {
                 self.set_dma_stop();
                 debug!("Set dma stop");
             }
@@ -168,7 +176,9 @@ impl<'a> SoundDevice<'a> {
         let stop_index = self.stop_at_buffer_len.expect("To have stop_index set");
         self.stopping = true;
         self.dma2.ch3.cr.modify(|_, w| w.en().disabled());
-        self.dma2.ch3.ndtr.write(|w| w.ndt().bits(stop_index));
+        if stop_index != 0 {
+            self.dma2.ch3.ndtr.write(|w| w.ndt().bits(stop_index));
+        }
         self.dma2.ch3.cr.modify(|_, w| {
             w.circ().disabled() // dma mode is circular
         });
@@ -176,18 +186,22 @@ impl<'a> SoundDevice<'a> {
         self.trigger_playing_stop_timer();
     }
 
-    fn init_tim2(&self, apb1enr: &stm32f303::rcc::APB1ENR) {
+    fn init_tim2(&self, apb1enr: &stm32f303::rcc::APB1ENR, apb1rstr: &stm32f303::rcc::APB1RSTR) {
+        apb1rstr.modify(|_, w| w.tim2rst().reset());
+        apb1rstr.modify(|_, w| w.tim2rst().clear_bit());
         apb1enr.modify(|_, w| w.tim2en().set_bit());
         self.tim2.cr2.write(|w| w.mms().update());
     }
 
-    fn init_tim7(&self, apb1enr: &stm32f303::rcc::APB1ENR) {
+    fn init_tim7(&self, apb1enr: &stm32f303::rcc::APB1ENR, apb1rstr: &stm32f303::rcc::APB1RSTR) {
+        apb1rstr.modify(|_, w| w.tim7rst().reset());
+        apb1rstr.modify(|_, w| w.tim7rst().clear_bit());
         apb1enr.modify(|_, w| w.tim7en().set_bit());
-        let psc_ms = u16((self.sysclk_freq.0 / 7200) - 1).unwrap();
-        let arr = PLAYING_DONE_DELAY / 7;
+        self.tim7.cr1.write(|w| w.opm().enabled().cen().disabled());
+        let psc_ms = u16((self.sysclk_freq.0 / 72000) - 1).unwrap();
+        let arr = PLAYING_DONE_DELAY;
         self.tim7.psc.write(|w| w.psc().bits(psc_ms));
         self.tim7.arr.write(|w| unsafe { w.bits(u32(arr)) });
-        self.tim7.cr1.write(|w| w.opm().enabled().cen().clear_bit());
         self.tim7.egr.write(|w| w.ug().update());
         self.tim7.sr.modify(|_, w| w.uif().clear());
         self.tim7.dier.write(|w| w.uie().enabled());

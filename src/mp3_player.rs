@@ -12,6 +12,13 @@ pub enum PlayError {
     FileError(FileError),
     NotAnMp3,
     NoValidMp3Frame,
+    PlaylistFinished,
+}
+
+impl From<FileError> for PlayError {
+    fn from(fe: FileError) -> Self {
+        PlayError::FileError(fe)
+    }
 }
 
 pub struct Mp3Player<'a> {
@@ -65,9 +72,7 @@ impl<'a> Mp3Player<'a> {
             .as_mut()
             .expect("prepare_read to have returned");
         let buf = &mut self.mp3_data[0..MP3_DETECT_SIZE];
-        let bytes_red = data_reader
-            .read_data(file_reader, buf)
-            .map_err(|e| PlayError::FileError(e))?;
+        let bytes_red = data_reader.read_data(file_reader, buf)?;
         if bytes_red != MP3_DETECT_SIZE
             || &buf[0..3] != "ID3".as_bytes()
             || (buf[5] & 0x0f != 0/* only first 4 bits of flags are available */)
@@ -130,9 +135,7 @@ impl<'a> Mp3Player<'a> {
                 self.mp3_data.len()
             );
             let out_slice = &mut self.mp3_data[self.write_index..];
-            let bytes_red = data_reader
-                .read_data(file_reader, out_slice)
-                .map_err(|e| PlayError::FileError(e))?;
+            let bytes_red = data_reader.read_data(file_reader, out_slice)?;
             debug!(
                 "Read {}, Remaining {} bytes",
                 bytes_red,
