@@ -184,7 +184,6 @@ const APP: () = {
             &mut buffers.dma_buffer,
             clocks.sysclk(),
             device.TIM2,
-            device.TIM7,
             device.DAC,
             device.DMA2,
         );
@@ -213,6 +212,7 @@ const APP: () = {
         });
         match next_playlist {
             Ok(playlist) => {
+                info!("Starting playlist: {}", playlist.name());
                 if cx.resources.current_playlist.replace(playlist).is_none() {
                     cx.spawn.playlist_next().expect("to spawn playlist next");
                 }
@@ -293,7 +293,7 @@ const APP: () = {
         }
     }
 
-    #[task(capacity=1, priority=8, resources=[playing_resources])]
+    #[task(capacity=1, priority=8, resources=[playing_resources], spawn=[playlist_next])]
     fn process_dma_request(cx: process_dma_request::Context, new_state: DmaState) {
         let pr = cx.resources.playing_resources;
         match new_state {
@@ -304,12 +304,19 @@ const APP: () = {
                 } else {
                     1
                 };
-                let fil_res =
-                    pr.sound_device
-                        .fill_pcm_buffer(index, &mut pr.mp3_player, &mut pr.card_reader);
-                if fil_res.is_err() {
-                    pr.sound_device.stop_playing();
+                match pr.sound_device.fill_pcm_buffer(
+                    index,
+                    &mut pr.mp3_player,
+                    &mut pr.card_reader,
+                ) {
+                    Err(_) => {
+                        cx.spawn.playlist_next().unwrap();
+                    }
+                    _ => {}
                 }
+            }
+            DmaState::Stopped => {
+                cx.spawn.playlist_next().unwrap();
             }
             _ => {}
         }
@@ -322,15 +329,6 @@ const APP: () = {
         if cx.spawn.process_dma_request(state).is_err() {
             error!("Spawn error. Stop playing!");
         }
-    }
-
-    #[task(binds = TIM7, priority=1, resources=[playing_resources], spawn=[playlist_next])]
-    fn tim7(mut cx: tim7::Context) {
-        debug!("Tim7 called, now: {:?}", Instant::now());
-        cx.resources.playing_resources.lock(|pr| {
-            pr.sound_device.playing_stop_timer_interrupt();
-        });
-        cx.spawn.playlist_next().unwrap();
     }
 
     extern "C" {

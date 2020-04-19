@@ -59,6 +59,7 @@ impl<'a> Mp3Player<'a> {
             data_reader.file_name(),
             data_reader.remaining()
         );
+        self.reset(file_reader);
         self.current_song.replace(data_reader);
         self.skip_id3v2_header(file_reader)?;
         self.init_buffer(file_reader)?;
@@ -101,6 +102,15 @@ impl<'a> Mp3Player<'a> {
         self.fill_buffer_intern(file_reader)
     }
 
+    fn reset(&mut self, file_reader: &mut impl FileReader) {
+        self.read_index = 0;
+        self.write_index = 0;
+        self.last_frame_rate = None;
+        if let Some(current_song) = self.current_song.take() {
+            current_song.close(file_reader);
+        }
+    }
+
     fn init_buffer(&mut self, file_reader: &mut impl FileReader) -> Result<(), PlayError> {
         self.fill_buffer_intern(file_reader)
     }
@@ -129,28 +139,19 @@ impl<'a> Mp3Player<'a> {
                 .current_song
                 .as_mut()
                 .expect("prepare_read to have returned");
-            debug!(
-                "Will read from card: {}..{}",
-                self.write_index,
-                self.mp3_data.len()
-            );
             let out_slice = &mut self.mp3_data[self.write_index..];
-            let bytes_red = data_reader.read_data(file_reader, out_slice)?;
-            debug!(
-                "Read {}, Remaining {} bytes",
-                bytes_red,
-                data_reader.remaining()
-            );
+            let bytes_red = data_reader.read_data(file_reader, out_slice);
+            if bytes_red.is_err() {
+                error!("Error reading data: {:?}", bytes_red);
+                return bytes_red.map(|_| ()).map_err(|e| PlayError::from(e));
+            }
+            let bytes_red = bytes_red.unwrap();
             self.write_index += bytes_red;
         }
         Ok(())
     }
 
     pub fn next_frame(&mut self, dma_buffer: &mut [u16]) -> usize {
-        debug!(
-            "Next frame: read_index: {}, write_index: {}",
-            self.read_index, self.write_index
-        );
         let mp3: &[u8] = &self.mp3_data[self.read_index..self.write_index];
         if mp3.len() == 0 {
             return 0;
@@ -160,10 +161,6 @@ impl<'a> Mp3Player<'a> {
         loop {
             match decode_result {
                 mp3::DecodeResult::Successful(bytes_read, frame) => {
-                    debug!(
-                        "Decoding successful: {} read_index: {}",
-                        bytes_read, self.read_index
-                    );
                     self.last_frame_rate.replace(frame.sample_rate.hz());
                     self.read_index += bytes_read;
                     let samples = pcm_buffer

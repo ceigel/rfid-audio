@@ -17,7 +17,8 @@ cortex-m-log = {"version"="0.6.1", features=["itm", "log-integration"]}
 
 [dependencies.stm32f3xx-hal]
 features = ["stm32f303xc", "rt"]
-version = "0.4.2"
+version = "0.4.3"
+path = "../stm32f3xx-hal/"
 
 [dependencies.cast]
 default-features = false
@@ -35,4 +36,4 @@ debug = true # symbols are nice and they don't increase the size on Flash
 lto = true # better optimizations
 
 [profile.dev]
-opt-level = 0
+opt-level = 3

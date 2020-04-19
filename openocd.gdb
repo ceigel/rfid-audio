@@ -11,7 +11,7 @@ break DefaultHandler
 break HardFault
 break rust_begin_unwind
 
-#break sound_device.rs:171
+#break sound_device.rs:176
 #break main.rs:235
 #break main.rs:215
 # *try* to stop at the user entry point (it might be gone due to inlining)
