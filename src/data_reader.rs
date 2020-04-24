@@ -1,5 +1,8 @@
 use crate::hal::hal as embedded_hal;
+use crate::hal::rcc::Clocks;
+use crate::hal::time::Hertz;
 use crate::playlist::{DirectoryNavigator, Playlist};
+use crate::SpiType;
 use embedded_sdmmc as sdmmc;
 use log::error;
 
@@ -58,30 +61,32 @@ pub trait FileReader {
     fn close_file(&mut self, file: sdmmc::File) -> Result<(), FileError>;
 }
 
-pub struct SdCardReader<SPI, CS>
+pub struct SdCardReader<CS>
 where
-    SPI: embedded_hal::spi::FullDuplex<u8>,
     CS: embedded_hal::digital::v2::OutputPin,
-    <SPI as embedded_hal::spi::FullDuplex<u8>>::Error: core::fmt::Debug,
 {
-    controller: sdmmc::Controller<sdmmc::SdMmcSpi<SPI, CS>, DummyTimeSource>,
+    controller: sdmmc::Controller<sdmmc::SdMmcSpi<SpiType, CS>, DummyTimeSource>,
     volume: sdmmc::Volume,
     root_dir: sdmmc::Directory,
 }
 
-impl<SPI, CS> SdCardReader<SPI, CS>
+impl<CS> SdCardReader<CS>
 where
-    SPI: embedded_hal::spi::FullDuplex<u8>,
     CS: embedded_hal::digital::v2::OutputPin,
-    <SPI as embedded_hal::spi::FullDuplex<u8>>::Error: core::fmt::Debug,
 {
-    pub fn new(spi: SPI, cs: CS) -> Result<Self, FileError> {
+    pub fn new(
+        spi: SpiType,
+        cs: CS,
+        freq: impl Into<Hertz>,
+        clocks: Clocks,
+    ) -> Result<Self, FileError> {
         let ts = DummyTimeSource {};
         let mut controller = sdmmc::Controller::new(sdmmc::SdMmcSpi::new(spi, cs), ts);
         controller
             .device()
             .init()
             .map_err(|e| sdmmc::Error::DeviceError(e))?;
+        controller.device().spi().reclock(freq, clocks);
         let volume = controller.get_volume(sdmmc::VolumeIdx(0))?;
         let root_dir = controller.open_root_dir(&volume)?;
         Ok(Self {
@@ -113,11 +118,9 @@ where
     }
 }
 
-impl<SPI, CS> FileReader for SdCardReader<SPI, CS>
+impl<CS> FileReader for SdCardReader<CS>
 where
-    SPI: embedded_hal::spi::FullDuplex<u8>,
     CS: embedded_hal::digital::v2::OutputPin,
-    <SPI as embedded_hal::spi::FullDuplex<u8>>::Error: core::fmt::Debug,
 {
     fn read_data(&mut self, file: &mut sdmmc::File, out: &mut [u8]) -> Result<usize, FileError> {
         self.controller.read(&self.volume, file, out)
@@ -127,11 +130,9 @@ where
     }
 }
 
-impl<SPI, CS> DirectoryNavigator for SdCardReader<SPI, CS>
+impl<CS> DirectoryNavigator for SdCardReader<CS>
 where
-    SPI: embedded_hal::spi::FullDuplex<u8>,
     CS: embedded_hal::digital::v2::OutputPin,
-    <SPI as embedded_hal::spi::FullDuplex<u8>>::Error: core::fmt::Debug,
 {
     fn open_file_read(&mut self, file: &sdmmc::DirEntry) -> Result<sdmmc::File, FileError> {
         self.controller

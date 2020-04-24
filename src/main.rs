@@ -9,26 +9,29 @@ mod mp3_player;
 mod playlist;
 mod sound_device;
 use data_reader::SdCardReader;
-use playlist::Playlist;
+use playlist::{Playlist, PlaylistMoveDirection};
 use sound_device::{DmaState, SoundDevice, DMA_LENGTH};
 
+use crate::hal::time::Hertz;
+use core::time::Duration;
 use cortex_m_log::destination;
 use cortex_m_log::log::Logger;
 use cortex_m_log::printer::itm::InterruptSync;
-use hal::gpio::{gpioa, Analog, Floating, Input, Output, PushPull, AF5};
+use embedded_hal::digital::v2::InputPin;
+use hal::gpio::{gpioa, Analog, Floating, Input, Output, PullDown, PushPull, AF5};
 use hal::hal as embedded_hal;
 use hal::spi::{Phase, Polarity, Spi};
 use log::{debug, error, info};
 use mp3_player::{Mp3Player, PlayError};
 use rtfm::app;
-use rtfm::cyccnt::Instant;
+use rtfm::cyccnt::{Instant, U32Ext};
 use stm32f3xx_hal as hal;
 use stm32f3xx_hal::prelude::*;
 
 static mut LOGGER: Option<Logger<InterruptSync>> = None;
-const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Debug;
-
+const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Info;
 const MP3_DATA_LENGTH: usize = 12 * 1024;
+const USER_CYCLIC_TIME: Duration = Duration::from_millis(125);
 
 struct CCRamBuffers {
     pub mp3_decoder_data: mp3::DecoderData,
@@ -62,10 +65,26 @@ static mut BUFFERS: Buffers = Buffers::new();
 #[link_section = ".ccram_data"]
 static mut CCRAM_BUFFERS: CCRamBuffers = CCRamBuffers::new();
 
+pub struct CyclesComputer {
+    frequency: Hertz,
+}
+
+impl CyclesComputer {
+    pub fn new(frequency: Hertz) -> Self {
+        CyclesComputer { frequency }
+    }
+
+    pub fn to_cycles(&self, duration: Duration) -> rtfm::cyccnt::Duration {
+        let s_part = (duration.as_secs() as u32) * self.frequency.0;
+        let mms_part = (duration.subsec_micros() / 1000) * (self.frequency.0 / 1000);
+        (s_part + mms_part).cycles()
+    }
+}
+
 fn init_clocks(
     cfgr: stm32f3xx_hal::rcc::CFGR,
     mut flash: stm32f3xx_hal::flash::Parts,
-) -> stm32f3xx_hal::rcc::Clocks {
+) -> hal::rcc::Clocks {
     cfgr.use_hse(8.mhz())
         .sysclk(72.mhz())
         .hclk(72.mhz())
@@ -79,18 +98,19 @@ type SpiPins = (
     hal::gpio::gpioa::PA6<AF5>,
     hal::gpio::gpioa::PA7<AF5>,
 );
-type SpiType = Spi<hal::stm32::SPI1, SpiPins>;
+
+pub(crate) type SpiType = Spi<hal::stm32::SPI1, SpiPins>;
 
 fn init_spi(
     spi1: hal::stm32::SPI1,
-    sck: hal::gpio::gpioa::PA5<Input<Floating>>,
-    miso: hal::gpio::gpioa::PA6<Input<Floating>>,
-    mosi: hal::gpio::gpioa::PA7<Input<Floating>>,
+    sck: gpioa::PA5<Input<Floating>>,
+    miso: gpioa::PA6<Input<Floating>>,
+    mosi: gpioa::PA7<Input<Floating>>,
     moder: &mut gpioa::MODER,
     afrl: &mut gpioa::AFRL,
     apb2: &mut hal::rcc::APB2,
     clocks: &hal::rcc::Clocks,
-    freq: impl Into<hal::time::Hertz>,
+    freq: impl Into<Hertz>,
 ) -> SpiType {
     let sck = sck.into_af5(moder, afrl);
     let miso = miso.into_af5(moder, afrl);
@@ -107,7 +127,67 @@ fn init_spi(
 pub struct PlayingResources {
     pub sound_device: SoundDevice<'static>,
     pub mp3_player: Mp3Player<'static>,
-    pub card_reader: SdCardReader<SpiType, hal::gpio::PXx<Output<PushPull>>>,
+    pub card_reader: SdCardReader<hal::gpio::PXx<Output<PushPull>>>,
+}
+
+#[derive(Copy, Clone)]
+pub struct Pressed {
+    time: Instant,
+    seen_count: u32,
+}
+
+impl Pressed {
+    pub fn new() -> Self {
+        Self {
+            time: Instant::now(),
+            seen_count: 0,
+        }
+    }
+
+    pub fn imcrement_seen(&mut self) {
+        self.seen_count += 1;
+    }
+
+    pub fn elapsed(&self) -> rtfm::cyccnt::Duration {
+        self.time.elapsed()
+    }
+
+    pub fn seen(&self) -> u32 {
+        self.seen_count
+    }
+}
+
+pub struct Buttons {
+    pub button_next: gpioa::PAx<Input<PullDown>>,
+    pub button_prev: gpioa::PAx<Input<PullDown>>,
+    pub btn_next_processed: bool,
+    pub btn_prev_processed: bool,
+}
+
+impl Buttons {
+    pub fn new(
+        button_next: gpioa::PAx<Input<PullDown>>,
+        button_prev: gpioa::PAx<Input<PullDown>>,
+    ) -> Self {
+        Buttons {
+            button_next,
+            button_prev,
+            btn_next_processed: false,
+            btn_prev_processed: false,
+        }
+    }
+}
+
+fn should_trigger(btn: &impl InputPin, processed: &mut bool) -> bool {
+    if btn.is_high().unwrap_or(false) {
+        if !*processed {
+            *processed = true;
+            return true;
+        }
+    } else if *processed {
+        *processed = false;
+    }
+    false
 }
 
 #[app(device = stm32f3xx_hal::stm32, monotonic = rtfm::cyccnt::CYCCNT, peripherals = true)]
@@ -117,8 +197,11 @@ const APP: () = {
         pa4: gpioa::PA4<Analog>,
         #[init(None)]
         current_playlist: Option<Playlist>,
+        time_computer: CyclesComputer,
+        buttons: Buttons,
     }
-    #[init(spawn=[start_playlist])]
+
+    #[init(spawn=[start_playlist, user_cyclic])]
     fn init(cx: init::Context) -> init::LateResources {
         let mut core = cx.core;
         core.DCB.enable_trace();
@@ -129,6 +212,7 @@ const APP: () = {
         let flash = device.FLASH.constrain();
         let mut rcc = device.RCC.constrain();
         let clocks = init_clocks(rcc.cfgr, flash);
+        let time_computer = CyclesComputer::new(clocks.sysclk());
 
         let logger: &Logger<InterruptSync> = unsafe {
             LOGGER.replace(Logger {
@@ -143,9 +227,19 @@ const APP: () = {
         let pa4 = gpioa.pa4.into_analog(&mut gpioa.moder, &mut gpioa.pupdr);
 
         let cs = gpioa
-            .pa1
+            .pa2
             .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper)
             .downgrade()
+            .downgrade();
+
+        let button_next = gpioa
+            .pa0
+            .into_pull_down_input(&mut gpioa.moder, &mut gpioa.pupdr)
+            .downgrade();
+
+        let button_prev = gpioa
+            .pa1
+            .into_pull_down_input(&mut gpioa.moder, &mut gpioa.pupdr)
             .downgrade();
 
         let spi = init_spi(
@@ -157,10 +251,10 @@ const APP: () = {
             &mut gpioa.afrl,
             &mut rcc.apb2,
             &clocks,
-            18.mhz(),
+            400.khz(),
         );
 
-        let card_reader = SdCardReader::new(spi, cs)
+        let card_reader = SdCardReader::new(spi, cs, 16.mhz(), clocks)
             .map_err(|e| {
                 error!("Card reader init failed: {:?}", e);
                 e
@@ -191,6 +285,7 @@ const APP: () = {
         info!("Init finished");
 
         cx.spawn.start_playlist("02").expect("To start play_intro");
+        cx.spawn.user_cyclic().expect("To start cyclic task");
         init::LateResources {
             playing_resources: PlayingResources {
                 sound_device,
@@ -198,7 +293,41 @@ const APP: () = {
                 card_reader,
             },
             pa4,
+            time_computer,
+            buttons: Buttons::new(button_next, button_prev),
         }
+    }
+
+    #[idle()]
+    fn idle(_cx: idle::Context) -> ! {
+        info!("idle");
+        loop {}
+    }
+
+    #[task(resources=[playing_resources, buttons, time_computer], priority=8, spawn=[playlist_next], schedule=[user_cyclic])]
+    fn user_cyclic(cx: user_cyclic::Context) {
+        let Buttons {
+            button_next,
+            button_prev,
+            btn_next_processed,
+            btn_prev_processed,
+        } = cx.resources.buttons;
+
+        if should_trigger(button_next, btn_next_processed) {
+            cx.resources.playing_resources.sound_device.stop_playing();
+            info!("Trigger playlist next");
+            cx.spawn.playlist_next(true).ok();
+        }
+        if should_trigger(button_prev, btn_prev_processed) {
+            cx.resources.playing_resources.sound_device.stop_playing();
+            info!("Trigger playlist prev");
+            cx.spawn.playlist_next(false).ok();
+        }
+        let user_cyclic: rtfm::cyccnt::Duration =
+            cx.resources.time_computer.to_cycles(USER_CYCLIC_TIME);
+        cx.schedule
+            .user_cyclic(cx.scheduled + user_cyclic)
+            .expect("To be able to schedule user_cyclic");
     }
 
     #[task(resources=[playing_resources, current_playlist], spawn=[playlist_next])]
@@ -214,7 +343,9 @@ const APP: () = {
             Ok(playlist) => {
                 info!("Starting playlist: {}", playlist.name());
                 if cx.resources.current_playlist.replace(playlist).is_none() {
-                    cx.spawn.playlist_next().expect("to spawn playlist next");
+                    cx.spawn
+                        .playlist_next(true)
+                        .expect("to spawn playlist next");
                 }
             }
             Err(e) => {
@@ -224,11 +355,17 @@ const APP: () = {
     }
 
     #[task(resources=[playing_resources, current_playlist])]
-    fn playlist_next(mut cx: playlist_next::Context) {
+    fn playlist_next(mut cx: playlist_next::Context, forward: bool) {
+        info!("Playlist_next called forward: {}", forward);
+        let direction = if forward {
+            PlaylistMoveDirection::Next
+        } else {
+            PlaylistMoveDirection::Previous
+        };
         if let Some(playlist) = cx.resources.current_playlist {
             let play_result = cx.resources.playing_resources.lock(|pr| {
                 playlist
-                    .move_next(&mut pr.card_reader)
+                    .move_next(direction, &mut pr.card_reader)
                     .map_err(|e| PlayError::from(e))
                     .and_then(|song| match song {
                         None => Ok(None),
@@ -271,28 +408,6 @@ const APP: () = {
         }
     }
 
-    #[idle(resources=[playing_resources])]
-    fn idle(mut cx: idle::Context) -> ! {
-        static mut TICK: Option<Instant> = None;
-        static mut ALREADY_STOPPED: bool = false;
-        TICK.replace(Instant::now());
-        info!("idle");
-        loop {
-            if TICK.unwrap().elapsed().as_cycles() > 4_000_000 {
-                *TICK = Some(Instant::now());
-                let stopping = cx
-                    .resources
-                    .playing_resources
-                    .lock(|pr| pr.sound_device.stopping);
-                if stopping && !*ALREADY_STOPPED {
-                    info!("Music stopped");
-                    log::logger().flush();
-                    *ALREADY_STOPPED = true
-                }
-            }
-        }
-    }
-
     #[task(capacity=1, priority=8, resources=[playing_resources], spawn=[playlist_next])]
     fn process_dma_request(cx: process_dma_request::Context, new_state: DmaState) {
         let pr = cx.resources.playing_resources;
@@ -310,13 +425,13 @@ const APP: () = {
                     &mut pr.card_reader,
                 ) {
                     Err(_) => {
-                        cx.spawn.playlist_next().unwrap();
+                        cx.spawn.playlist_next(true).unwrap();
                     }
                     _ => {}
                 }
             }
             DmaState::Stopped => {
-                cx.spawn.playlist_next().unwrap();
+                cx.spawn.playlist_next(true).unwrap();
             }
             _ => {}
         }

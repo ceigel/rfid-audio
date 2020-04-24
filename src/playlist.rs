@@ -1,6 +1,12 @@
 use crate::data_reader::{DataReader, FileError};
 use embedded_sdmmc as sdmmc;
 
+#[derive(PartialEq)]
+pub enum PlaylistMoveDirection {
+    Next,
+    Previous,
+}
+
 pub struct Playlist {
     directory: sdmmc::Directory,
     directory_name: sdmmc::ShortFileName,
@@ -31,11 +37,16 @@ impl Playlist {
 
     pub fn move_next(
         &mut self,
+        dir: PlaylistMoveDirection,
         directory_navigator: &mut impl DirectoryNavigator,
     ) -> Result<Option<DataReader>, FileError> {
         let comp = |de1: &sdmmc::DirEntry, de2: &sdmmc::DirEntry| {
             if let (Ok(den1), Ok(den2)) = (de1.name.base_name(), de2.name.base_name()) {
-                den1 < den2
+                if dir == PlaylistMoveDirection::Next {
+                    den1 < den2
+                } else {
+                    den1 > den2
+                }
             } else {
                 false
             }
