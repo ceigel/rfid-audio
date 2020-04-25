@@ -4,8 +4,10 @@ use crate::hal::time::Hertz;
 use crate::playlist::{DirectoryNavigator, Playlist};
 use crate::SpiType;
 use embedded_sdmmc as sdmmc;
-use log::error;
+use log::{debug, error};
 
+const LOGGING_FILE: &str = "cards.txt";
+const END_LINE: &str = "\n\r";
 struct DummyTimeSource {}
 impl sdmmc::TimeSource for DummyTimeSource {
     fn get_timestamp(&self) -> sdmmc::Timestamp {
@@ -109,12 +111,48 @@ where
     }
 
     pub fn open_directory(&mut self, directory_name: &str) -> Result<Playlist, FileError> {
+        match self
+            .controller
+            .find_directory_entry(&self.volume, &self.root_dir, directory_name)
+        {
+            Ok(_) => self.open_existing_directory(directory_name),
+            Err(FileError::FileNotFound) => {
+                error!("directory {} not found", directory_name);
+                self.directory_not_found(directory_name)?;
+                Err(FileError::FileNotFound)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn open_existing_directory(&mut self, directory_name: &str) -> Result<Playlist, FileError> {
         let dir = self
             .controller
             .open_dir(&self.volume, &self.root_dir, directory_name)?;
         let dir_name = sdmmc::ShortFileName::create_from_str(directory_name)
             .map_err(|e| FileError::FilenameError(e))?;
         Ok(Playlist::new(dir, dir_name))
+    }
+
+    fn directory_not_found(&mut self, directory_name: &str) -> Result<(), FileError> {
+        let mut log_file = self.controller.open_file_in_dir(
+            &mut self.volume,
+            &self.root_dir,
+            LOGGING_FILE,
+            sdmmc::Mode::ReadWriteCreateOrAppend,
+        )?;
+
+        let res = self
+            .controller
+            .write(&mut self.volume, &mut log_file, directory_name.as_bytes());
+        let res = res
+            .and_then(|_| {
+                self.controller
+                    .write(&mut self.volume, &mut log_file, END_LINE.as_bytes())
+            })
+            .map(|_| ());
+        let res2 = self.controller.close_file(&self.volume, log_file);
+        res.and(res2)
     }
 }
 

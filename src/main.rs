@@ -29,7 +29,7 @@ use stm32f3xx_hal as hal;
 use stm32f3xx_hal::prelude::*;
 
 static mut LOGGER: Option<Logger<InterruptSync>> = None;
-const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Info;
+const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Debug;
 const MP3_DATA_LENGTH: usize = 12 * 1024;
 const USER_CYCLIC_TIME: Duration = Duration::from_millis(125);
 
@@ -158,16 +158,16 @@ impl Pressed {
 }
 
 pub struct Buttons {
-    pub button_next: gpioa::PAx<Input<PullDown>>,
-    pub button_prev: gpioa::PAx<Input<PullDown>>,
+    pub button_next: gpioa::PA0<Input<PullDown>>,
+    pub button_prev: gpioa::PA1<Input<PullDown>>,
     pub btn_next_processed: bool,
     pub btn_prev_processed: bool,
 }
 
 impl Buttons {
     pub fn new(
-        button_next: gpioa::PAx<Input<PullDown>>,
-        button_prev: gpioa::PAx<Input<PullDown>>,
+        button_next: gpioa::PA0<Input<PullDown>>,
+        button_prev: gpioa::PA1<Input<PullDown>>,
     ) -> Self {
         Buttons {
             button_next,
@@ -234,13 +234,11 @@ const APP: () = {
 
         let button_next = gpioa
             .pa0
-            .into_pull_down_input(&mut gpioa.moder, &mut gpioa.pupdr)
-            .downgrade();
+            .into_pull_down_input(&mut gpioa.moder, &mut gpioa.pupdr);
 
         let button_prev = gpioa
             .pa1
-            .into_pull_down_input(&mut gpioa.moder, &mut gpioa.pupdr)
-            .downgrade();
+            .into_pull_down_input(&mut gpioa.moder, &mut gpioa.pupdr);
 
         let spi = init_spi(
             device.SPI1,
@@ -284,7 +282,9 @@ const APP: () = {
 
         info!("Init finished");
 
-        cx.spawn.start_playlist("02").expect("To start play_intro");
+        cx.spawn
+            .start_playlist("0202")
+            .expect("To start play_intro");
         cx.spawn.user_cyclic().expect("To start cyclic task");
         init::LateResources {
             playing_resources: PlayingResources {
@@ -313,15 +313,18 @@ const APP: () = {
             btn_prev_processed,
         } = cx.resources.buttons;
 
-        if should_trigger(button_next, btn_next_processed) {
+        let next_trigger = should_trigger(button_next, btn_next_processed);
+        let prev_trigger = should_trigger(button_prev, btn_prev_processed);
+        if next_trigger || prev_trigger {
             cx.resources.playing_resources.sound_device.stop_playing();
-            info!("Trigger playlist next");
-            cx.spawn.playlist_next(true).ok();
-        }
-        if should_trigger(button_prev, btn_prev_processed) {
-            cx.resources.playing_resources.sound_device.stop_playing();
-            info!("Trigger playlist prev");
-            cx.spawn.playlist_next(false).ok();
+            if next_trigger {
+                info!("Trigger playlist next");
+                cx.spawn.playlist_next(true).ok();
+            }
+            if prev_trigger {
+                info!("Trigger playlist prev");
+                cx.spawn.playlist_next(false).ok();
+            }
         }
         let user_cyclic: rtfm::cyccnt::Duration =
             cx.resources.time_computer.to_cycles(USER_CYCLIC_TIME);
@@ -332,11 +335,8 @@ const APP: () = {
 
     #[task(resources=[playing_resources, current_playlist], spawn=[playlist_next])]
     fn start_playlist(mut cx: start_playlist::Context, directory_name: &'static str) {
-        let currently_playing = cx.resources.current_playlist.is_some();
         let next_playlist = cx.resources.playing_resources.lock(|pr| {
-            if currently_playing {
-                pr.sound_device.stop_playing();
-            }
+            pr.sound_device.stop_playing();
             pr.card_reader.open_directory(directory_name)
         });
         match next_playlist {
