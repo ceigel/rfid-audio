@@ -1,4 +1,4 @@
-use crate::data_reader::{DataReader, FileError, FileReader};
+use crate::data_reader::{DataReader, DirectoryNavigator, FileError};
 use crate::sound_device::SoundDevice;
 use crate::MP3_DATA_LENGTH;
 use embedded_mp3 as mp3;
@@ -28,7 +28,6 @@ pub struct Mp3Player<'a> {
     decoder: mp3::Decoder<'a>,
     pub(crate) last_frame_rate: Option<time::Hertz>,
     pcm_buffer: &'a mut [i16; mp3::MAX_SAMPLES_PER_FRAME],
-    current_song: Option<DataReader>,
 }
 
 impl<'a> Mp3Player<'a> {
@@ -44,14 +43,13 @@ impl<'a> Mp3Player<'a> {
             decoder: mp3::Decoder::new(decoder_data),
             pcm_buffer: pcm_buffer,
             last_frame_rate: None,
-            current_song: None,
         }
     }
 
     pub fn play_song(
         &mut self,
-        data_reader: DataReader,
-        file_reader: &mut impl FileReader,
+        data_reader: &mut DataReader,
+        directory_navigator: &mut impl DirectoryNavigator,
         sound_device: &mut SoundDevice,
     ) -> Result<(), PlayError> {
         info!(
@@ -59,21 +57,20 @@ impl<'a> Mp3Player<'a> {
             data_reader.file_name(),
             data_reader.remaining()
         );
-        self.reset(file_reader);
-        self.current_song.replace(data_reader);
-        self.skip_id3v2_header(file_reader)?;
-        self.init_buffer(file_reader)?;
-        sound_device.start_playing(self, file_reader)
+        self.reset();
+        self.skip_id3v2_header(data_reader, directory_navigator)?;
+        self.init_buffer(data_reader, directory_navigator)?;
+        sound_device.start_playing(self, data_reader, directory_navigator)
     }
 
-    fn skip_id3v2_header(&mut self, file_reader: &mut impl FileReader) -> Result<(), PlayError> {
+    fn skip_id3v2_header(
+        &mut self,
+        data_reader: &mut DataReader,
+        directory_navigator: &mut impl DirectoryNavigator,
+    ) -> Result<(), PlayError> {
         const MP3_DETECT_SIZE: usize = 10;
-        let data_reader = self
-            .current_song
-            .as_mut()
-            .expect("prepare_read to have returned");
         let buf = &mut self.mp3_data[0..MP3_DETECT_SIZE];
-        let bytes_red = data_reader.read_data(file_reader, buf)?;
+        let bytes_red = data_reader.read_data(directory_navigator, buf)?;
         if bytes_red != MP3_DETECT_SIZE
             || &buf[0..3] != "ID3".as_bytes()
             || (buf[5] & 0x0f != 0/* only first 4 bits of flags are available */)
@@ -98,28 +95,34 @@ impl<'a> Mp3Player<'a> {
             .map_err(|_| PlayError::NotAnMp3)
     }
 
-    pub fn fill_buffer(&mut self, file_reader: &mut impl FileReader) -> Result<(), PlayError> {
-        self.fill_buffer_intern(file_reader)
+    pub fn fill_buffer(
+        &mut self,
+        data_reader: &mut DataReader,
+        directory_navigator: &mut impl DirectoryNavigator,
+    ) -> Result<(), PlayError> {
+        self.fill_buffer_intern(data_reader, directory_navigator)
     }
 
-    fn reset(&mut self, file_reader: &mut impl FileReader) {
+    fn reset(&mut self) {
         self.read_index = 0;
         self.write_index = 0;
         self.last_frame_rate = None;
-        if let Some(current_song) = self.current_song.take() {
-            current_song.close(file_reader);
-        }
     }
 
-    fn init_buffer(&mut self, file_reader: &mut impl FileReader) -> Result<(), PlayError> {
-        self.fill_buffer_intern(file_reader)
+    fn init_buffer(
+        &mut self,
+        data_reader: &mut DataReader,
+        directory_navigator: &mut impl DirectoryNavigator,
+    ) -> Result<(), PlayError> {
+        self.fill_buffer_intern(data_reader, directory_navigator)
     }
 
     pub fn fill_buffer_intern(
         &mut self,
-        file_reader: &mut impl FileReader,
+        data_reader: &mut DataReader,
+        directory_navigator: &mut impl DirectoryNavigator,
     ) -> Result<(), PlayError> {
-        if self.current_song.as_ref().map_or(true, |song| song.done()) {
+        if data_reader.done() {
             return Ok(());
         }
         if self.read_index < MP3_TRIGGER_MOVE && self.write_index == self.mp3_data.len() {
@@ -135,12 +138,8 @@ impl<'a> Mp3Player<'a> {
             self.read_index = 0;
             self.write_index = copy_len;
         } else {
-            let data_reader = self
-                .current_song
-                .as_mut()
-                .expect("prepare_read to have returned");
             let out_slice = &mut self.mp3_data[self.write_index..];
-            let bytes_red = data_reader.read_data(file_reader, out_slice);
+            let bytes_red = data_reader.read_data(directory_navigator, out_slice);
             if bytes_red.is_err() {
                 error!("Error reading data: {:?}", bytes_red);
                 return bytes_red.map(|_| ()).map_err(|e| PlayError::from(e));

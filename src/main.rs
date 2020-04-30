@@ -252,7 +252,7 @@ const APP: () = {
             400.khz(),
         );
 
-        let card_reader = SdCardReader::new(spi, cs, 16.mhz(), clocks)
+        let card_reader = SdCardReader::new(spi, cs, 8.mhz(), clocks)
             .map_err(|e| {
                 error!("Card reader init failed: {:?}", e);
                 e
@@ -282,9 +282,7 @@ const APP: () = {
 
         info!("Init finished");
 
-        cx.spawn
-            .start_playlist("0202")
-            .expect("To start play_intro");
+        cx.spawn.start_playlist("01").expect("To start playlist");
         cx.spawn.user_cyclic().expect("To start cyclic task");
         init::LateResources {
             playing_resources: PlayingResources {
@@ -334,23 +332,33 @@ const APP: () = {
     }
 
     #[task(resources=[playing_resources, current_playlist], spawn=[playlist_next])]
-    fn start_playlist(mut cx: start_playlist::Context, directory_name: &'static str) {
-        let next_playlist = cx.resources.playing_resources.lock(|pr| {
-            pr.sound_device.stop_playing();
-            pr.card_reader.open_directory(directory_name)
+    fn start_playlist(cx: start_playlist::Context, directory_name: &'static str) {
+        let start_playlistResources {
+            mut playing_resources,
+            mut current_playlist,
+        } = cx.resources;
+        let play_result = current_playlist.lock(|playlist| {
+            playing_resources.lock(|pr| {
+                pr.sound_device.stop_playing();
+                playlist
+                    .take()
+                    .map(|playlist| playlist.close(&mut pr.card_reader));
+                pr.card_reader
+                    .open_directory(directory_name)
+                    .map_err(|e| {
+                        error!("Can not open directory: {}, err: {:?}", directory_name, e);
+                        e
+                    })
+                    .map(|next_playlist| {
+                        info!("Starting playlist: {}", next_playlist.name());
+                        playlist.replace(next_playlist);
+                    })
+            })
         });
-        match next_playlist {
-            Ok(playlist) => {
-                info!("Starting playlist: {}", playlist.name());
-                if cx.resources.current_playlist.replace(playlist).is_none() {
-                    cx.spawn
-                        .playlist_next(true)
-                        .expect("to spawn playlist next");
-                }
-            }
-            Err(e) => {
-                error!("Can not open directory: {}, err: {:?}", directory_name, e);
-            }
+        if play_result.is_ok() {
+            cx.spawn
+                .playlist_next(true)
+                .expect("to spawn playlist next");
         }
     }
 
@@ -362,55 +370,49 @@ const APP: () = {
         } else {
             PlaylistMoveDirection::Previous
         };
-        if let Some(playlist) = cx.resources.current_playlist {
-            let play_result = cx.resources.playing_resources.lock(|pr| {
-                playlist
-                    .move_next(direction, &mut pr.card_reader)
-                    .map_err(|e| PlayError::from(e))
-                    .and_then(|song| match song {
-                        None => Ok(None),
-                        Some(song) => {
-                            let file_name = song.file_name();
-                            pr.mp3_player.play_song(
-                                song,
-                                &mut pr.card_reader,
-                                &mut pr.sound_device,
-                            )?;
-                            Ok(Some(file_name))
+        let playing_resources = &mut cx.resources.playing_resources;
+        let current_playlist = &mut cx.resources.current_playlist;
+        current_playlist.lock(|playlist| {
+            playing_resources.lock(|pr| {
+                pr.sound_device.stop_playing();
+                match playlist {
+                    None => info!("Playlist none"),
+                    Some(playlist) => {
+                        let play_result = playlist
+                            .move_next(direction, &mut pr.card_reader)
+                            .map_err(|e| PlayError::from(e))
+                            .and_then(|song| {
+                                if let Some(song) = song {
+                                    let file_name = song.file_name();
+                                    pr.mp3_player
+                                        .play_song(song, &mut pr.card_reader, &mut pr.sound_device)
+                                        .map(|_| Some(file_name))
+                                } else {
+                                    Ok(None)
+                                }
+                            });
+                        match play_result {
+                            Ok(Some(file_name)) => info!("Playing {}", file_name),
+                            Ok(None) => info!("Playing nothing"),
+                            Err(e) => {
+                                error!("Playlist {} can't be played: {:?}", playlist.name(), e)
+                            }
                         }
-                    })
-            });
-            match play_result {
-                Ok(file_name) => info!("Playing {:?}", file_name),
-                Err(e) => error!("Playlist {} can't be played: {:?}", playlist.name(), e),
-            }
-        }
-    }
-
-    #[task(resources=[playing_resources])]
-    fn play_intro(mut cx: play_intro::Context) {
-        let play_result = cx.resources.playing_resources.lock(|pr| {
-            let card_reader = &mut pr.card_reader;
-            let sound_device = &mut pr.sound_device;
-            let mp3_player = &mut pr.mp3_player;
-            card_reader
-                .open_file("intro.mp3")
-                .map_err(|e| PlayError::FileError(e))
-                .and_then(|song| {
-                    let file_name = song.file_name();
-                    mp3_player.play_song(song, card_reader, sound_device)?;
-                    Ok(file_name)
-                })
+                    }
+                }
+            })
         });
-        match play_result {
-            Ok(file_name) => info!("Playing {}", file_name),
-            Err(e) => error!("Intro file can't be played: {:?}", e),
-        }
     }
 
-    #[task(capacity=1, priority=8, resources=[playing_resources], spawn=[playlist_next])]
+    #[task(capacity=1, priority=8, resources=[playing_resources, current_playlist], spawn=[playlist_next])]
     fn process_dma_request(cx: process_dma_request::Context, new_state: DmaState) {
         let pr = cx.resources.playing_resources;
+        let playlist = cx
+            .resources
+            .current_playlist
+            .as_mut()
+            .expect("to have a playlist to play");
+        let current_song = playlist.current_song().expect("to play a song");
         match new_state {
             DmaState::Unknown => panic!("Unknown dma state"),
             DmaState::HalfTrigger | DmaState::TriggerComplete => {
@@ -422,6 +424,7 @@ const APP: () = {
                 match pr.sound_device.fill_pcm_buffer(
                     index,
                     &mut pr.mp3_player,
+                    current_song,
                     &mut pr.card_reader,
                 ) {
                     Err(_) => {

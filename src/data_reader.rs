@@ -1,10 +1,10 @@
 use crate::hal::hal as embedded_hal;
 use crate::hal::rcc::Clocks;
 use crate::hal::time::Hertz;
-use crate::playlist::{DirectoryNavigator, Playlist};
+use crate::playlist::Playlist;
 use crate::SpiType;
 use embedded_sdmmc as sdmmc;
-use log::{debug, error};
+use log::error;
 
 const LOGGING_FILE: &str = "cards.txt";
 const END_LINE: &str = "\n\r";
@@ -19,24 +19,31 @@ pub(crate) type FileError = sdmmc::Error<sdmmc::SdMmcError>;
 
 pub struct DataReader {
     file: sdmmc::File,
-    file_name: sdmmc::ShortFileName,
+    pub dir_entry: sdmmc::DirEntry,
 }
 
 impl DataReader {
-    pub fn new(file: sdmmc::File, file_name: sdmmc::ShortFileName) -> Self {
-        DataReader { file, file_name }
+    pub fn open_direntry(
+        directory_navigator: &mut impl DirectoryNavigator,
+        dir_entry: &sdmmc::DirEntry,
+    ) -> Result<DataReader, FileError> {
+        let file = directory_navigator.open_direntry(dir_entry)?;
+        Ok(DataReader {
+            file,
+            dir_entry: dir_entry.clone(),
+        })
     }
 
     pub fn read_data(
         &mut self,
-        file_reader: &mut impl FileReader,
+        directory_navigator: &mut impl DirectoryNavigator,
         out: &mut [u8],
     ) -> Result<usize, FileError> {
-        file_reader.read_data(&mut self.file, out)
+        directory_navigator.read_data(&mut self.file, out)
     }
 
     pub fn file_name(&self) -> sdmmc::ShortFileName {
-        self.file_name.clone()
+        self.dir_entry.name.clone()
     }
 
     pub fn done(&self) -> bool {
@@ -51,16 +58,12 @@ impl DataReader {
         self.file.seek_from_start(offset)
     }
 
-    pub fn close(self, file_reader: &mut impl FileReader) {
-        if let Err(e) = file_reader.close_file(self.file) {
-            error!("Error closing file {}: {:?}", self.file_name, e);
-        }
+    pub fn close_file(
+        self,
+        directory_navigator: &mut impl DirectoryNavigator,
+    ) -> Result<(), FileError> {
+        directory_navigator.close_file(self.file)
     }
-}
-
-pub trait FileReader {
-    fn read_data(&mut self, file: &mut sdmmc::File, out: &mut [u8]) -> Result<usize, FileError>;
-    fn close_file(&mut self, file: sdmmc::File) -> Result<(), FileError>;
 }
 
 pub struct SdCardReader<CS>
@@ -96,18 +99,6 @@ where
             volume,
             root_dir,
         })
-    }
-
-    pub fn open_file(&mut self, file_name: &str) -> Result<DataReader, FileError> {
-        let file = self.controller.open_file_in_dir(
-            &mut self.volume,
-            &self.root_dir,
-            file_name,
-            sdmmc::Mode::ReadOnly,
-        )?;
-        let file_name = sdmmc::ShortFileName::create_from_str(file_name)
-            .map_err(|e| FileError::FilenameError(e))?;
-        Ok(DataReader::new(file, file_name))
     }
 
     pub fn open_directory(&mut self, directory_name: &str) -> Result<Playlist, FileError> {
@@ -156,23 +147,33 @@ where
     }
 }
 
-impl<CS> FileReader for SdCardReader<CS>
-where
-    CS: embedded_hal::digital::v2::OutputPin,
-{
-    fn read_data(&mut self, file: &mut sdmmc::File, out: &mut [u8]) -> Result<usize, FileError> {
-        self.controller.read(&self.volume, file, out)
-    }
-    fn close_file(&mut self, file: sdmmc::File) -> Result<(), FileError> {
-        self.controller.close_file(&self.volume, file)
-    }
+pub trait DirectoryNavigator {
+    fn read_data(&mut self, file: &mut sdmmc::File, out: &mut [u8]) -> Result<usize, FileError>;
+    fn close_file(&mut self, file: sdmmc::File) -> Result<(), FileError>;
+    fn open_direntry(&mut self, file: &sdmmc::DirEntry) -> Result<sdmmc::File, FileError>;
+    fn next_file(
+        &mut self,
+        dir: &sdmmc::Directory,
+        current_file: Option<&sdmmc::DirEntry>,
+        extension: &str,
+        comp: impl Fn(&sdmmc::DirEntry, &sdmmc::DirEntry) -> bool,
+    ) -> Result<Option<sdmmc::DirEntry>, FileError>;
+    fn close_dir(&mut self, dir: sdmmc::Directory);
 }
 
 impl<CS> DirectoryNavigator for SdCardReader<CS>
 where
     CS: embedded_hal::digital::v2::OutputPin,
 {
-    fn open_file_read(&mut self, file: &sdmmc::DirEntry) -> Result<sdmmc::File, FileError> {
+    fn read_data(&mut self, file: &mut sdmmc::File, out: &mut [u8]) -> Result<usize, FileError> {
+        self.controller.read(&self.volume, file, out)
+    }
+
+    fn close_file(&mut self, file: sdmmc::File) -> Result<(), FileError> {
+        self.controller.close_file(&self.volume, file)
+    }
+
+    fn open_direntry(&mut self, file: &sdmmc::DirEntry) -> Result<sdmmc::File, FileError> {
         self.controller
             .open_dir_entry(&mut self.volume, file.clone(), sdmmc::Mode::ReadOnly)
     }

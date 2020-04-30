@@ -1,4 +1,4 @@
-use crate::data_reader::FileReader;
+use crate::data_reader::{DataReader, DirectoryNavigator};
 use crate::mp3_player::{Mp3Player, PlayError};
 use log::{error, info};
 use rtfm::cyccnt::Instant;
@@ -91,19 +91,27 @@ impl<'a> SoundDevice<'a> {
     pub(crate) fn start_playing(
         &mut self,
         mp3_player: &mut Mp3Player,
-        file_reader: &mut impl FileReader,
+        data_reader: &mut DataReader,
+        directory_navigator: &mut impl DirectoryNavigator,
     ) -> Result<(), PlayError> {
         info!("start playing");
         self.stop_playing();
-        self.fill_pcm_buffer(0, mp3_player, file_reader)?;
-        self.fill_pcm_buffer(1, mp3_player, file_reader)?;
+        self.fill_pcm_buffer(0, mp3_player, data_reader, directory_navigator)?;
+        self.fill_pcm_buffer(1, mp3_player, data_reader, directory_navigator)?;
         let freq = mp3_player
             .last_frame_rate
             .ok_or(PlayError::NoValidMp3Frame)?;
         let arr = self.sysclk_freq.0 / freq.0;
         self.tim2.arr.write(|w| w.arr().bits(arr));
         self.tim2.cr1.modify(|_, w| w.cen().enabled());
-        self.dma2.ch3.cr.modify(|_, w| w.en().enabled());
+        self.dma2.ch3.cr.modify(|_, w| {
+            w.circ().enabled();
+            w.tcie().enabled();
+            w.htie().enabled();
+            w.en().enabled()
+        });
+        let ndt = self.dma_buffer.len() as u16;
+        self.dma2.ch3.ndtr.write(|w| w.ndt().bits(ndt));
         self.stopping = false;
         self.stop_at_buffer_len = None;
         Ok(())
@@ -113,7 +121,8 @@ impl<'a> SoundDevice<'a> {
         &mut self,
         buffer_index: usize,
         mp3_player: &mut Mp3Player,
-        file_reader: &mut impl FileReader,
+        data_reader: &mut DataReader,
+        directory_navigator: &mut impl DirectoryNavigator,
     ) -> Result<(), PlayError> {
         let buffer_len = self.dma_buffer.len();
         let dma_buffer_slice: &mut [u16] = match buffer_index {
@@ -133,10 +142,12 @@ impl<'a> SoundDevice<'a> {
             self.stop_at_buffer_len = Some(end_index);
             Ok(())
         } else {
-            mp3_player.fill_buffer(file_reader).map_err(|e| {
-                self.stop_playing();
-                e
-            })
+            mp3_player
+                .fill_buffer(data_reader, directory_navigator)
+                .map_err(|e| {
+                    self.stop_playing();
+                    e
+                })
         }
     }
 
@@ -235,9 +246,9 @@ impl<'a> SoundDevice<'a> {
             w.pinc().disabled(); // don't increment peripheral address every transfer
             w.msize().bits16(); // memory word size is 32 bits
             w.psize().bits16(); // peripheral word size is 32 bits
-            w.circ().enabled(); // dma mode is circular
             w.pl().high(); // set dma priority to high
             w.teie().enabled(); // trigger an interrupt if an error occurs
+            w.circ().enabled(); // dma mode is circular
             w.tcie().enabled(); // trigger an interrupt when transfer is complete
             w.htie().enabled(); // trigger an interrupt when half the transfer is complete
             w
