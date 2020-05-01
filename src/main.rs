@@ -158,22 +158,33 @@ impl Pressed {
 }
 
 pub struct Buttons {
-    pub button_next: gpioa::PA0<Input<PullDown>>,
-    pub button_prev: gpioa::PA1<Input<PullDown>>,
+    pub button_next: gpioa::PAx<Input<PullDown>>,
+    pub button_prev: gpioa::PAx<Input<PullDown>>,
+    pub button_pause: gpioa::PAx<Input<PullDown>>,
     pub btn_next_processed: bool,
     pub btn_prev_processed: bool,
+    pub btn_pause_processed: bool,
 }
 
 impl Buttons {
     pub fn new(
-        button_next: gpioa::PA0<Input<PullDown>>,
-        button_prev: gpioa::PA1<Input<PullDown>>,
+        pa0: gpioa::PA0<Input<Floating>>,
+        pa1: gpioa::PA1<Input<Floating>>,
+        pa3: gpioa::PA3<Input<Floating>>,
+        moder: &mut gpioa::MODER,
+        pupdr: &mut gpioa::PUPDR,
     ) -> Self {
+        let button_next = pa3.into_pull_down_input(moder, pupdr).downgrade();
+        let button_prev = pa1.into_pull_down_input(moder, pupdr).downgrade();
+        let button_pause = pa0.into_pull_down_input(moder, pupdr).downgrade();
+
         Buttons {
             button_next,
             button_prev,
+            button_pause,
             btn_next_processed: false,
             btn_prev_processed: false,
+            btn_pause_processed: false,
         }
     }
 }
@@ -232,14 +243,6 @@ const APP: () = {
             .downgrade()
             .downgrade();
 
-        let button_next = gpioa
-            .pa0
-            .into_pull_down_input(&mut gpioa.moder, &mut gpioa.pupdr);
-
-        let button_prev = gpioa
-            .pa1
-            .into_pull_down_input(&mut gpioa.moder, &mut gpioa.pupdr);
-
         let spi = init_spi(
             device.SPI1,
             gpioa.pa5,
@@ -280,9 +283,17 @@ const APP: () = {
             device.DMA2,
         );
 
+        let buttons = Buttons::new(
+            gpioa.pa0,
+            gpioa.pa1,
+            gpioa.pa3,
+            &mut gpioa.moder,
+            &mut gpioa.pupdr,
+        );
+
         info!("Init finished");
 
-        cx.spawn.start_playlist("01").expect("To start playlist");
+        cx.spawn.start_playlist("02").expect("To start playlist");
         cx.spawn.user_cyclic().expect("To start cyclic task");
         init::LateResources {
             playing_resources: PlayingResources {
@@ -292,7 +303,7 @@ const APP: () = {
             },
             pa4,
             time_computer,
-            buttons: Buttons::new(button_next, button_prev),
+            buttons,
         }
     }
 
@@ -307,12 +318,15 @@ const APP: () = {
         let Buttons {
             button_next,
             button_prev,
+            button_pause,
             btn_next_processed,
             btn_prev_processed,
+            btn_pause_processed,
         } = cx.resources.buttons;
 
         let next_trigger = should_trigger(button_next, btn_next_processed);
         let prev_trigger = should_trigger(button_prev, btn_prev_processed);
+        let pause_trigger = should_trigger(button_pause, btn_pause_processed);
         if next_trigger || prev_trigger {
             cx.resources.playing_resources.sound_device.stop_playing();
             if next_trigger {
@@ -323,6 +337,10 @@ const APP: () = {
                 info!("Trigger playlist prev");
                 cx.spawn.playlist_next(false).ok();
             }
+        }
+        if pause_trigger {
+            info!("Trigger pause");
+            cx.resources.playing_resources.sound_device.toggle_pause();
         }
         let user_cyclic: rtfm::cyccnt::Duration =
             cx.resources.time_computer.to_cycles(USER_CYCLIC_TIME);

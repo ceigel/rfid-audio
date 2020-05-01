@@ -182,6 +182,9 @@ impl<'a> SoundDevice<'a> {
         }
         state
     }
+    pub fn toggle_pause(&self) {
+        self.tim2.cr1.modify(|r, w| w.cen().bit(!r.cen().bit()));
+    }
 
     pub fn stop_playing(&self) {
         self.tim2.cr1.modify(|_, w| w.cen().disabled());
