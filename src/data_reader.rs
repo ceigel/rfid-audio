@@ -2,7 +2,7 @@ use crate::hal::hal as embedded_hal;
 use crate::hal::rcc::Clocks;
 use crate::hal::time::Hertz;
 use crate::playlist::Playlist;
-use crate::SpiType;
+use crate::Spi1Type;
 use embedded_sdmmc as sdmmc;
 use log::error;
 
@@ -70,7 +70,7 @@ pub struct SdCardReader<CS>
 where
     CS: embedded_hal::digital::v2::OutputPin,
 {
-    controller: sdmmc::Controller<sdmmc::SdMmcSpi<SpiType, CS>, DummyTimeSource>,
+    controller: sdmmc::Controller<sdmmc::SdMmcSpi<Spi1Type, CS>, DummyTimeSource>,
     volume: sdmmc::Volume,
     root_dir: sdmmc::Directory,
 }
@@ -80,7 +80,7 @@ where
     CS: embedded_hal::digital::v2::OutputPin,
 {
     pub fn new(
-        spi: SpiType,
+        spi: Spi1Type,
         cs: CS,
         freq: impl Into<Hertz>,
         clocks: Clocks,
@@ -190,10 +190,7 @@ where
                 if dir_entry.attributes.is_hidden() || dir_entry.attributes.is_directory() {
                     return;
                 }
-                if dir_entry.name.extension().is_err() || dir_entry.name.base_name().is_err() {
-                    return;
-                }
-                if dir_entry.name.extension().unwrap() != extension {
+                if dir_entry.name.extension() != extension.as_bytes() {
                     return;
                 }
                 match (current_file, next_dir_entry.as_ref()) {

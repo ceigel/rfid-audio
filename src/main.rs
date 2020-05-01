@@ -5,11 +5,12 @@ extern crate embedded_mp3 as mp3;
 use panic_itm as _;
 
 mod data_reader;
+mod hex;
 mod mp3_player;
 mod playlist;
 mod sound_device;
 use data_reader::SdCardReader;
-use playlist::{Playlist, PlaylistMoveDirection};
+use playlist::{Playlist, PlaylistMoveDirection, PlaylistName};
 use sound_device::{DmaState, SoundDevice, DMA_LENGTH};
 
 use crate::hal::time::Hertz;
@@ -17,14 +18,15 @@ use core::time::Duration;
 use cortex_m_log::destination;
 use cortex_m_log::log::Logger;
 use cortex_m_log::printer::itm::InterruptSync;
-use embedded_hal::digital::v2::InputPin;
-use hal::gpio::{gpioa, Analog, Floating, Input, Output, PullDown, PushPull, AF5};
+use embedded_hal::digital::{v1_compat, v2::InputPin};
+use hal::gpio::{gpioa, gpiob, Analog, Floating, Input, Output, PullDown, PushPull, AF5};
 use hal::hal as embedded_hal;
 use hal::spi::{Phase, Polarity, Spi};
 use log::{debug, error, info};
+use mfrc522::{self, Mfrc522};
 use mp3_player::{Mp3Player, PlayError};
 use rtfm::app;
-use rtfm::cyccnt::{Instant, U32Ext};
+use rtfm::cyccnt::U32Ext;
 use stm32f3xx_hal as hal;
 use stm32f3xx_hal::prelude::*;
 
@@ -60,7 +62,6 @@ impl Buffers {
         }
     }
 }
-
 static mut BUFFERS: Buffers = Buffers::new();
 #[link_section = ".ccram_data"]
 static mut CCRAM_BUFFERS: CCRamBuffers = CCRamBuffers::new();
@@ -93,15 +94,21 @@ fn init_clocks(
         .freeze(&mut flash.acr)
 }
 
-type SpiPins = (
+type Spi1Pins = (
     hal::gpio::gpioa::PA5<AF5>,
     hal::gpio::gpioa::PA6<AF5>,
     hal::gpio::gpioa::PA7<AF5>,
 );
 
-pub(crate) type SpiType = Spi<hal::stm32::SPI1, SpiPins>;
+type Spi2Pins = (
+    hal::gpio::gpiob::PB13<AF5>,
+    hal::gpio::gpiob::PB14<AF5>,
+    hal::gpio::gpiob::PB15<AF5>,
+);
+pub(crate) type Spi1Type = Spi<hal::stm32::SPI1, Spi1Pins>;
+pub(crate) type Spi2Type = Spi<hal::stm32::SPI2, Spi2Pins>;
 
-fn init_spi(
+fn init_spi1(
     spi1: hal::stm32::SPI1,
     sck: gpioa::PA5<Input<Floating>>,
     miso: gpioa::PA6<Input<Floating>>,
@@ -111,7 +118,7 @@ fn init_spi(
     apb2: &mut hal::rcc::APB2,
     clocks: &hal::rcc::Clocks,
     freq: impl Into<Hertz>,
-) -> SpiType {
+) -> Spi1Type {
     let sck = sck.into_af5(moder, afrl);
     let miso = miso.into_af5(moder, afrl);
     let mosi = mosi.into_af5(moder, afrl);
@@ -124,37 +131,69 @@ fn init_spi(
     spi
 }
 
+type RFIDReaderType = Mfrc522<Spi2Type, v1_compat::OldOutputPin<hal::gpio::PXx<Output<PushPull>>>>;
+
+fn init_rfid_reader(
+    spi2: hal::stm32::SPI2,
+    mut gpiob: gpiob::Parts,
+    apb1: &mut hal::rcc::APB1,
+    clocks: &hal::rcc::Clocks,
+) -> RFIDReaderType {
+    let cs2 = gpiob
+        .pb12
+        .into_push_pull_output(&mut gpiob.moder, &mut gpiob.otyper)
+        .downgrade()
+        .downgrade();
+    let spi2 = init_spi2(
+        spi2,
+        gpiob.pb13,
+        gpiob.pb14,
+        gpiob.pb15,
+        &mut gpiob.moder,
+        &mut gpiob.afrh,
+        apb1,
+        &clocks,
+        400.khz(),
+    );
+    let rfid_reader =
+        Mfrc522::new(spi2, v1_compat::OldOutputPin::new(cs2)).and_then(|mut rfid_reader| {
+            let version = rfid_reader.version()?;
+            info!("RFID reader version: 0x{:0x}", version);
+            Ok(rfid_reader)
+        });
+    match rfid_reader {
+        Ok(rfid_reader) => rfid_reader,
+        Err(e) => panic!("Can't initialize RFID reader, error: {:?}", e),
+    }
+}
+
+fn init_spi2(
+    spi2: hal::stm32::SPI2,
+    sck: gpiob::PB13<Input<Floating>>,
+    miso: gpiob::PB14<Input<Floating>>,
+    mosi: gpiob::PB15<Input<Floating>>,
+    moder: &mut gpiob::MODER,
+    afrh: &mut gpiob::AFRH,
+    apb1: &mut hal::rcc::APB1,
+    clocks: &hal::rcc::Clocks,
+    freq: impl Into<Hertz>,
+) -> Spi2Type {
+    let sck = sck.into_af5(moder, afrh);
+    let miso = miso.into_af5(moder, afrh);
+    let mosi = mosi.into_af5(moder, afrh);
+    let spi_mode = embedded_hal::spi::Mode {
+        polarity: Polarity::IdleLow,
+        phase: Phase::CaptureOnFirstTransition,
+    };
+
+    let spi = Spi::spi2(spi2, (sck, miso, mosi), spi_mode, freq, *clocks, apb1);
+    spi
+}
+
 pub struct PlayingResources {
     pub sound_device: SoundDevice<'static>,
     pub mp3_player: Mp3Player<'static>,
     pub card_reader: SdCardReader<hal::gpio::PXx<Output<PushPull>>>,
-}
-
-#[derive(Copy, Clone)]
-pub struct Pressed {
-    time: Instant,
-    seen_count: u32,
-}
-
-impl Pressed {
-    pub fn new() -> Self {
-        Self {
-            time: Instant::now(),
-            seen_count: 0,
-        }
-    }
-
-    pub fn imcrement_seen(&mut self) {
-        self.seen_count += 1;
-    }
-
-    pub fn elapsed(&self) -> rtfm::cyccnt::Duration {
-        self.time.elapsed()
-    }
-
-    pub fn seen(&self) -> u32 {
-        self.seen_count
-    }
 }
 
 pub struct Buttons {
@@ -174,9 +213,9 @@ impl Buttons {
         moder: &mut gpioa::MODER,
         pupdr: &mut gpioa::PUPDR,
     ) -> Self {
-        let button_next = pa3.into_pull_down_input(moder, pupdr).downgrade();
+        let button_next = pa0.into_pull_down_input(moder, pupdr).downgrade();
         let button_prev = pa1.into_pull_down_input(moder, pupdr).downgrade();
-        let button_pause = pa0.into_pull_down_input(moder, pupdr).downgrade();
+        let button_pause = pa3.into_pull_down_input(moder, pupdr).downgrade();
 
         Buttons {
             button_next,
@@ -201,6 +240,11 @@ fn should_trigger(btn: &impl InputPin, processed: &mut bool) -> bool {
     false
 }
 
+fn rfid_read_card(rfid_reader: &mut RFIDReaderType) -> Option<mfrc522::Uid> {
+    let atqa = rfid_reader.reqa();
+    atqa.and_then(|atqa| rfid_reader.select(&atqa)).ok()
+}
+
 #[app(device = stm32f3xx_hal::stm32, monotonic = rtfm::cyccnt::CYCCNT, peripherals = true)]
 const APP: () = {
     struct Resources {
@@ -210,6 +254,7 @@ const APP: () = {
         current_playlist: Option<Playlist>,
         time_computer: CyclesComputer,
         buttons: Buttons,
+        rfid_reader: Mfrc522<Spi2Type, v1_compat::OldOutputPin<hal::gpio::PXx<Output<PushPull>>>>,
     }
 
     #[init(spawn=[start_playlist, user_cyclic])]
@@ -235,15 +280,23 @@ const APP: () = {
         cortex_m_log::log::init(logger).expect("To set logger");
 
         let mut gpioa = device.GPIOA.split(&mut rcc.ahb);
-        let pa4 = gpioa.pa4.into_analog(&mut gpioa.moder, &mut gpioa.pupdr);
+        let buttons = Buttons::new(
+            gpioa.pa0,
+            gpioa.pa1,
+            gpioa.pa3,
+            &mut gpioa.moder,
+            &mut gpioa.pupdr,
+        );
 
-        let cs = gpioa
+        let pa4 = gpioa.pa4.into_analog(&mut gpioa.moder, &mut gpioa.pupdr); // Speaker out
+
+        let cs1 = gpioa
             .pa2
             .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper)
             .downgrade()
             .downgrade();
 
-        let spi = init_spi(
+        let spi1 = init_spi1(
             device.SPI1,
             gpioa.pa5,
             gpioa.pa6,
@@ -254,13 +307,17 @@ const APP: () = {
             &clocks,
             400.khz(),
         );
-
-        let card_reader = SdCardReader::new(spi, cs, 8.mhz(), clocks)
+        let card_reader = SdCardReader::new(spi1, cs1, 8.mhz(), clocks)
             .map_err(|e| {
                 error!("Card reader init failed: {:?}", e);
                 e
             })
-            .expect("To have a card reader");
+            .expect("To have a sd card reader");
+
+        let gpiob = device.GPIOB.split(&mut rcc.ahb);
+        let rfid_reader = init_rfid_reader(device.SPI2, gpiob, &mut rcc.apb1, &clocks);
+        /*let rfid_reader =
+        Mfrc522::new(spi2, v1_compat::OldOutputPin::new(cs2)).expect("To have a rfid reader");*/
 
         let buffers = unsafe { &mut BUFFERS };
         let ccram_buffers = unsafe { &mut CCRAM_BUFFERS };
@@ -283,17 +340,11 @@ const APP: () = {
             device.DMA2,
         );
 
-        let buttons = Buttons::new(
-            gpioa.pa0,
-            gpioa.pa1,
-            gpioa.pa3,
-            &mut gpioa.moder,
-            &mut gpioa.pupdr,
-        );
-
         info!("Init finished");
 
-        cx.spawn.start_playlist("02").expect("To start playlist");
+        cx.spawn
+            .start_playlist(PlaylistName::new("02"))
+            .expect("To start playlist");
         cx.spawn.user_cyclic().expect("To start cyclic task");
         init::LateResources {
             playing_resources: PlayingResources {
@@ -304,6 +355,7 @@ const APP: () = {
             pa4,
             time_computer,
             buttons,
+            rfid_reader,
         }
     }
 
@@ -313,7 +365,7 @@ const APP: () = {
         loop {}
     }
 
-    #[task(resources=[playing_resources, buttons, time_computer], priority=8, spawn=[playlist_next], schedule=[user_cyclic])]
+    #[task(resources=[playing_resources, buttons, time_computer, rfid_reader], priority=8, spawn=[playlist_next, start_playlist], schedule=[user_cyclic])]
     fn user_cyclic(cx: user_cyclic::Context) {
         let Buttons {
             button_next,
@@ -342,6 +394,12 @@ const APP: () = {
             info!("Trigger pause");
             cx.resources.playing_resources.sound_device.toggle_pause();
         }
+        let mut uid_hex: [u8; 8] = [0; 8];
+        if let Some(uid) = rfid_read_card(cx.resources.rfid_reader) {
+            hex::encode_to_slice(&uid.bytes()[0..4], &mut uid_hex[..]);
+            let next_playlist = PlaylistName::from_bytes(&uid_hex[..]);
+            cx.spawn.start_playlist(next_playlist).ok();
+        }
         let user_cyclic: rtfm::cyccnt::Duration =
             cx.resources.time_computer.to_cycles(USER_CYCLIC_TIME);
         cx.schedule
@@ -350,7 +408,7 @@ const APP: () = {
     }
 
     #[task(resources=[playing_resources, current_playlist], spawn=[playlist_next])]
-    fn start_playlist(cx: start_playlist::Context, directory_name: &'static str) {
+    fn start_playlist(cx: start_playlist::Context, directory_name: PlaylistName) {
         let start_playlistResources {
             mut playing_resources,
             mut current_playlist,
@@ -362,9 +420,9 @@ const APP: () = {
                     .take()
                     .map(|playlist| playlist.close(&mut pr.card_reader));
                 pr.card_reader
-                    .open_directory(directory_name)
+                    .open_directory(&directory_name.as_str())
                     .map_err(|e| {
-                        error!("Can not open directory: {}, err: {:?}", directory_name, e);
+                        error!("Can not open directory: {:?}, err: {:?}", directory_name, e);
                         e
                     })
                     .map(|next_playlist| {

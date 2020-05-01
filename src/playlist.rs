@@ -7,6 +7,38 @@ pub enum PlaylistMoveDirection {
     Previous,
 }
 
+#[derive(Clone, Debug)]
+pub struct PlaylistName {
+    pub name: [u8; 8],
+    pub name_len: usize,
+}
+
+impl PlaylistName {
+    pub fn new(name: &str) -> Self {
+        let name_bytes = name.as_bytes();
+        let mut slf = Self {
+            name: [0; 8],
+            name_len: name_bytes.len(),
+        };
+        slf.name[0..name_bytes.len()].clone_from_slice(name_bytes);
+        slf
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let name_len = bytes.len();
+        let mut slf = Self {
+            name: [0; 8],
+            name_len,
+        };
+        slf.name[0..name_len].clone_from_slice(bytes);
+        slf
+    }
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len])
+            .expect("To be able to convert playlist name to str")
+    }
+}
+
 pub struct Playlist {
     directory: sdmmc::Directory,
     directory_name: sdmmc::ShortFileName,
@@ -28,14 +60,11 @@ impl Playlist {
         directory_navigator: &mut impl DirectoryNavigator,
     ) -> Result<Option<&mut DataReader>, FileError> {
         let comp = |de1: &sdmmc::DirEntry, de2: &sdmmc::DirEntry| {
-            if let (Ok(den1), Ok(den2)) = (de1.name.base_name(), de2.name.base_name()) {
-                if dir == PlaylistMoveDirection::Next {
-                    den1 < den2
-                } else {
-                    den1 > den2
-                }
+            let (den1, den2) = (de1.name.base_name(), de2.name.base_name());
+            if dir == PlaylistMoveDirection::Next {
+                den1 < den2
             } else {
-                false
+                den1 > den2
             }
         };
         let current_dir_entry = self.current_file.as_ref().map(|f| f.dir_entry.clone());
@@ -66,6 +95,8 @@ impl Playlist {
     }
 
     pub fn close(self, directory_navigator: &mut impl DirectoryNavigator) {
+        self.current_file
+            .map(|cf| cf.close_file(directory_navigator));
         directory_navigator.close_dir(self.directory);
     }
 }

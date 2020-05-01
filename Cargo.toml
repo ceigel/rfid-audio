@@ -14,6 +14,7 @@ panic-itm = "0.4.1"
 embedded-sdmmc = {version="0.3.0", path = "../embedded-sdmmc-rs"}
 log = {"version"="0.4.8", features=["max_level_trace", "release_max_level_warn"]}
 cortex-m-log = {"version"="0.6.1", features=["itm", "log-integration"]}
+mfrc522 = "0.2.0"
 
 [dependencies.stm32f3xx-hal]
 features = ["stm32f303xc", "rt"]
