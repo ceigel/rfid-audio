@@ -151,13 +151,14 @@ impl<'a> Mp3Player<'a> {
     }
 
     pub fn next_frame(&mut self, dma_buffer: &mut [u16]) -> usize {
-        let mp3: &[u8] = &self.mp3_data[self.read_index..self.write_index];
-        if mp3.len() == 0 {
-            return 0;
-        }
-        let pcm_buffer = &mut self.pcm_buffer;
-        let decode_result = self.decoder.decode(mp3, pcm_buffer);
+        let mut index: usize = 0;
         loop {
+            let mp3: &[u8] = &self.mp3_data[self.read_index..self.write_index];
+            if mp3.len() == 0 {
+                return index;
+            }
+            let pcm_buffer = &mut self.pcm_buffer;
+            let decode_result = self.decoder.decode(mp3, pcm_buffer);
             match decode_result {
                 mp3::DecodeResult::Successful(bytes_read, frame) => {
                     self.last_frame_rate.replace(frame.sample_rate.hz());
@@ -165,14 +166,15 @@ impl<'a> Mp3Player<'a> {
                     let samples = pcm_buffer
                         .iter()
                         .step_by(frame.channels as usize)
-                        .take(frame.sample_count as usize)
+                        .take(frame.sample_count.min(dma_buffer.len() - index) as usize)
                         .map(|sample| ((*sample as i32) - (core::i16::MIN as i32)) as u16 >> 4);
-                    let mut index: usize = 0;
                     for val in samples {
                         dma_buffer[index] = val;
                         index += 1;
                     }
-                    return index;
+                    if index == dma_buffer.len() {
+                        return index;
+                    }
                 }
                 mp3::DecodeResult::SkippedData(skipped_data) => {
                     debug!("Skipping: {} read_index: {}", skipped_data, self.read_index);
@@ -180,18 +182,18 @@ impl<'a> Mp3Player<'a> {
                         Some(new_val) => {
                             if new_val >= self.write_index {
                                 error!("Skipped data outside buffer. read_index: {}, write_index: {}, skipped_data: {}", self.read_index, self.write_index, skipped_data);
-                                return 0;
+                                return index;
                             }
                             self.read_index = new_val;
                         }
                         None => {
                             error!("Skipped data overflowed read_index add. read_index: {}, skipped_data: {}", self.read_index, skipped_data);
-                            return 0;
+                            return index;
                         }
                     }
                 }
                 mp3::DecodeResult::InsufficientData => {
-                    return 0;
+                    return index;
                 }
             }
         }

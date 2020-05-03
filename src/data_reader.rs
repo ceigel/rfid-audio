@@ -7,7 +7,8 @@ use embedded_sdmmc as sdmmc;
 use log::error;
 
 const LOGGING_FILE: &str = "cards.txt";
-const END_LINE: &str = "\n\r";
+const END_LINE: &str = "\r\n";
+const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 struct DummyTimeSource {}
 impl sdmmc::TimeSource for DummyTimeSource {
     fn get_timestamp(&self) -> sdmmc::Timestamp {
@@ -132,16 +133,18 @@ where
             LOGGING_FILE,
             sdmmc::Mode::ReadWriteCreateOrAppend,
         )?;
-
-        let res = self
-            .controller
-            .write(&mut self.volume, &mut log_file, directory_name.as_bytes());
-        let res = res
-            .and_then(|_| {
-                self.controller
-                    .write(&mut self.volume, &mut log_file, END_LINE.as_bytes())
-            })
-            .map(|_| ());
+        let mut res: Result<usize, FileError> = Ok(0);
+        if log_file.length() == 0 {
+            res = self.controller.write(&mut self.volume, &mut log_file, &BOM);
+        }
+        res = res.and_then(|_| {
+            self.controller
+                .write(&mut self.volume, &mut log_file, directory_name.as_bytes())
+        });
+        res = res.and_then(|_| {
+            self.controller
+                .write(&mut self.volume, &mut log_file, END_LINE.as_bytes())
+        });
         let res2 = self.controller.close_file(&self.volume, log_file);
         res.and(res2)
     }

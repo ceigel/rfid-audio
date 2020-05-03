@@ -11,7 +11,7 @@ set backtrace limit 32
 break HardFault
 #break rust_begin_unwind
 
-#break main.rs:215
+#break mp3_player.rs:162
 # *try* to stop at the user entry point (it might be gone due to inlining)
 
 # # send captured ITM to the file itm.fifo

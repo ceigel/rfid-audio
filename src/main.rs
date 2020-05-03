@@ -6,6 +6,7 @@ use panic_itm as _;
 
 mod data_reader;
 mod hex;
+mod leds;
 mod mp3_player;
 mod playlist;
 mod sound_device;
@@ -22,6 +23,7 @@ use embedded_hal::digital::{v1_compat, v2::InputPin};
 use hal::gpio::{gpioa, gpiob, Analog, Floating, Input, Output, PullDown, PushPull, AF5};
 use hal::hal as embedded_hal;
 use hal::spi::{Phase, Polarity, Spi};
+use leds::{Leds, LedsState};
 use log::{debug, error, info};
 use mfrc522::{self, Mfrc522};
 use mp3_player::{Mp3Player, PlayError};
@@ -32,7 +34,7 @@ use stm32f3xx_hal::prelude::*;
 
 static mut LOGGER: Option<Logger<InterruptSync>> = None;
 const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Debug;
-const MP3_DATA_LENGTH: usize = 12 * 1024;
+const MP3_DATA_LENGTH: usize = 10 * 1024;
 const USER_CYCLIC_TIME: Duration = Duration::from_millis(125);
 
 struct CCRamBuffers {
@@ -255,6 +257,7 @@ const APP: () = {
         time_computer: CyclesComputer,
         buttons: Buttons,
         rfid_reader: Mfrc522<Spi2Type, v1_compat::OldOutputPin<hal::gpio::PXx<Output<PushPull>>>>,
+        //leds: Leds,
     }
 
     #[init(spawn=[start_playlist, user_cyclic])]
@@ -275,7 +278,7 @@ const APP: () = {
                 inner: InterruptSync::new(destination::itm::Itm::new(core.ITM)),
                 level: LOG_LEVEL,
             });
-            LOGGER.as_ref().unwrap()
+            LOGGER.as_ref().expect("to have a logger")
         };
         cortex_m_log::log::init(logger).expect("To set logger");
 
@@ -316,8 +319,6 @@ const APP: () = {
 
         let gpiob = device.GPIOB.split(&mut rcc.ahb);
         let rfid_reader = init_rfid_reader(device.SPI2, gpiob, &mut rcc.apb1, &clocks);
-        /*let rfid_reader =
-        Mfrc522::new(spi2, v1_compat::OldOutputPin::new(cs2)).expect("To have a rfid reader");*/
 
         let buffers = unsafe { &mut BUFFERS };
         let ccram_buffers = unsafe { &mut CCRAM_BUFFERS };
@@ -340,12 +341,15 @@ const APP: () = {
             device.DMA2,
         );
 
-        info!("Init finished");
+        let leds = Leds::new(device.GPIOE.split(&mut rcc.ahb));
 
-        cx.spawn
-            .start_playlist(PlaylistName::new("02"))
-            .expect("To start playlist");
+        /*cx.spawn
+        //.start_playlist(PlaylistName::new("87B13133"))
+        .start_playlist(PlaylistName::new("F460482A"))
+        //.start_playlist(PlaylistName::new("02"))
+        .expect("To start playlist");*/
         cx.spawn.user_cyclic().expect("To start cyclic task");
+        info!("Init finished");
         init::LateResources {
             playing_resources: PlayingResources {
                 sound_device,
@@ -356,6 +360,7 @@ const APP: () = {
             time_computer,
             buttons,
             rfid_reader,
+            //leds,
         }
     }
 
@@ -423,11 +428,13 @@ const APP: () = {
                     .open_directory(&directory_name.as_str())
                     .map_err(|e| {
                         error!("Can not open directory: {:?}, err: {:?}", directory_name, e);
+                        //leds.set_state(LedsState::Red, true);
                         e
                     })
                     .map(|next_playlist| {
                         info!("Starting playlist: {}", next_playlist.name());
                         playlist.replace(next_playlist);
+                        //leds.set_state(LedsState::Green, true);
                     })
             })
         });
@@ -504,13 +511,13 @@ const APP: () = {
                     &mut pr.card_reader,
                 ) {
                     Err(_) => {
-                        cx.spawn.playlist_next(true).unwrap();
+                        cx.spawn.playlist_next(true).ok();
                     }
                     _ => {}
                 }
             }
             DmaState::Stopped => {
-                cx.spawn.playlist_next(true).unwrap();
+                cx.spawn.playlist_next(true).ok();
             }
             _ => {}
         }
