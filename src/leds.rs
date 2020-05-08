@@ -1,11 +1,12 @@
+#![allow(dead_code)]
 use hal::gpio::{gpioe, Output, PushPull};
 use hal::prelude::*;
 use stm32f3xx_hal as hal;
 
-pub struct Leds {
-    led_red: hal::gpio::PXx<Output<PushPull>>,
-    led_orange: hal::gpio::PXx<Output<PushPull>>,
-    led_green: hal::gpio::PXx<Output<PushPull>>,
+pub struct RealLeds {
+    led_red: gpioe::PE9<Output<PushPull>>,
+    led_orange: gpioe::PE10<Output<PushPull>>,
+    led_green: gpioe::PE11<Output<PushPull>>,
 }
 
 pub enum LedsState {
@@ -14,24 +15,18 @@ pub enum LedsState {
     Red,
 }
 
-impl Leds {
+impl RealLeds {
     pub fn new(mut gpioe: gpioe::Parts) -> Self {
         Self {
             led_red: gpioe
                 .pe9
-                .into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper)
-                .downgrade()
-                .downgrade(),
+                .into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper),
             led_orange: gpioe
                 .pe10
-                .into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper)
-                .downgrade()
-                .downgrade(),
+                .into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper),
             led_green: gpioe
                 .pe11
-                .into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper)
-                .downgrade()
-                .downgrade(),
+                .into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper),
         }
     }
     pub fn set_state(&mut self, state: LedsState, clear: bool) {
@@ -52,3 +47,14 @@ impl Leds {
         self.led_green.set_low().expect("To reset red led");
     }
 }
+
+pub struct FakeLeds();
+impl FakeLeds {
+    pub fn new(mut _gpioe: gpioe::Parts) -> Self {
+        Self {}
+    }
+    pub fn set_state(&mut self, _state: LedsState, _clear: bool) {}
+    pub fn clear_state(&mut self) {}
+}
+
+pub type Leds = RealLeds;

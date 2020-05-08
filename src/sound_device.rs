@@ -1,7 +1,7 @@
 use crate::data_reader::{DataReader, DirectoryNavigator};
 use crate::mp3_player::{Mp3Player, PlayError};
 use log::{error, info};
-use rtfm::cyccnt::Instant;
+use rtfm::cyccnt::{Duration, Instant};
 use stm32f3xx_hal::stm32 as stm32f303;
 use stm32f3xx_hal::stm32::Interrupt;
 use stm32f3xx_hal::time;
@@ -59,6 +59,7 @@ pub struct SoundDevice<'a> {
     sysclk_freq: time::Hertz,
     pub stopping: bool,
     pub debug_data: DebuggingData,
+    play_pause_start: Option<Instant>,
 }
 
 impl<'a> SoundDevice<'a> {
@@ -80,6 +81,7 @@ impl<'a> SoundDevice<'a> {
             sysclk_freq: sysclk,
             stopping: false,
             debug_data: DebuggingData::new(),
+            play_pause_start: None,
         };
         let apb1rstr = apb1rstr();
         obj.init_tim2(apb1enr, apb1rstr);
@@ -114,7 +116,12 @@ impl<'a> SoundDevice<'a> {
         self.dma2.ch3.ndtr.write(|w| w.ndt().bits(ndt));
         self.stopping = false;
         self.stop_at_buffer_len = None;
+        self.play_pause_start.replace(Instant::now());
         Ok(())
+    }
+
+    pub fn play_pause_elapsed(&self) -> Option<Duration> {
+        self.play_pause_start.map(|t| t.elapsed())
     }
 
     pub fn fill_pcm_buffer(
@@ -134,10 +141,8 @@ impl<'a> SoundDevice<'a> {
         let end_index = filled + buffer_index * (buffer_len / 2);
         if filled < buffer_len / 2 {
             info!(
-                "Finishing music buffer_index: {}, filled:{}, now: {:?}",
-                buffer_index,
-                filled,
-                Instant::now()
+                "Finishing music buffer_index: {}, filled:{}",
+                buffer_index, filled,
             );
             self.stop_at_buffer_len = Some(end_index);
             Ok(())
@@ -182,13 +187,14 @@ impl<'a> SoundDevice<'a> {
         }
         state
     }
-    pub fn toggle_pause(&self) {
+    pub fn toggle_pause(&mut self) {
         self.tim2.cr1.modify(|r, w| w.cen().bit(!r.cen().bit()));
     }
 
-    pub fn stop_playing(&self) {
+    pub fn stop_playing(&mut self) {
         self.tim2.cr1.modify(|_, w| w.cen().disabled());
         self.dma2.ch3.cr.modify(|_, w| w.en().disabled());
+        self.play_pause_start.take();
     }
 
     pub fn set_dma_stop(&mut self, state: DmaState) -> DmaState {

@@ -13,17 +13,16 @@ pub struct PlaylistName {
     pub name_len: usize,
 }
 
-impl PlaylistName {
-    pub fn new(name: &str) -> Self {
-        let name_bytes = name.as_bytes();
-        let mut slf = Self {
-            name: [0; 8],
-            name_len: name_bytes.len(),
-        };
-        slf.name[0..name_bytes.len()].clone_from_slice(name_bytes);
-        slf
+impl core::fmt::Display for PlaylistName {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        for c in self.name.iter().take(self.name_len) {
+            write!(f, "{}", *c as char)?;
+        }
+        Ok(())
     }
+}
 
+impl PlaylistName {
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let name_len = bytes.len();
         let mut slf = Self {
@@ -36,6 +35,12 @@ impl PlaylistName {
     pub fn as_str(&self) -> &str {
         core::str::from_utf8(&self.name[..self.name_len])
             .expect("To be able to convert playlist name to str")
+    }
+}
+
+impl PartialEq<sdmmc::ShortFileName> for PlaylistName {
+    fn eq(&self, other: &sdmmc::ShortFileName) -> bool {
+        self.name == other.base_name()
     }
 }
 
