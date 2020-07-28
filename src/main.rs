@@ -165,10 +165,15 @@ fn init_rfid_reader(
         Mfrc522::new(spi2, v1_compat::OldOutputPin::new(cs2)).and_then(|mut rfid_reader| {
             let version = rfid_reader.version()?;
             info!("RFID reader version: 0x{:0x}", version);
-            Ok(rfid_reader)
+            Ok((rfid_reader, version))
         });
     match rfid_reader {
-        Ok(rfid_reader) => rfid_reader,
+        Ok((rfid_reader, version)) => {
+            if version != 0x92 && version != 0x93 {
+                panic!("Wrong RFID version {}", version);
+            }
+            rfid_reader
+        }
         Err(e) => panic!("Can't initialize RFID reader, error: {:?}", e),
     }
 }
