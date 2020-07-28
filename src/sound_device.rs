@@ -1,7 +1,7 @@
 use crate::data_reader::{DataReader, DirectoryNavigator};
 use crate::mp3_player::{Mp3Player, PlayError};
 use log::{error, info};
-use rtfm::cyccnt::{Duration, Instant};
+use rtic::cyccnt::{Duration, Instant};
 use stm32f3xx_hal::stm32 as stm32f303;
 use stm32f3xx_hal::stm32::Interrupt;
 use stm32f3xx_hal::time;

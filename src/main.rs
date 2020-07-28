@@ -31,8 +31,8 @@ use stm32f3xx_hal::prelude::*;
 
 use log::{debug, error, info};
 use mfrc522::{self, Mfrc522};
-use rtfm::app;
-use rtfm::cyccnt::U32Ext;
+use rtic::app;
+use rtic::cyccnt::U32Ext;
 
 static mut LOGGER: Option<Logger<InterruptSync>> = None;
 const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Debug;
@@ -81,7 +81,7 @@ impl CyclesComputer {
         CyclesComputer { frequency }
     }
 
-    pub fn to_cycles(&self, duration: time::Duration) -> rtfm::cyccnt::Duration {
+    pub fn to_cycles(&self, duration: time::Duration) -> rtic::cyccnt::Duration {
         let s_part = (duration.as_secs() as u32) * self.frequency.0;
         let mms_part = (duration.subsec_micros() / 1000) * (self.frequency.0 / 1000);
         (s_part + mms_part).cycles()
@@ -284,7 +284,7 @@ fn rfid_read_card(rfid_reader: &mut RFIDReaderType) -> Option<mfrc522::Uid> {
     atqa.and_then(|atqa| rfid_reader.select(&atqa)).ok()
 }
 
-#[app(device = stm32f3xx_hal::stm32, monotonic = rtfm::cyccnt::CYCCNT, peripherals = true)]
+#[app(device = stm32f3xx_hal::stm32, monotonic = rtic::cyccnt::CYCCNT, peripherals = true)]
 const APP: () = {
     struct Resources {
         playing_resources: PlayingResources,
@@ -295,9 +295,9 @@ const APP: () = {
         rfid_reader: Mfrc522<Spi2Type, v1_compat::OldOutputPin<hal::gpio::PXx<Output<PushPull>>>>,
         leds: Leds,
         exti: hal::stm32::EXTI,
-        btn_click_debase: rtfm::cyccnt::Duration,
-        card_scan_pause: rtfm::cyccnt::Duration,
-        user_cyclic_time: rtfm::cyccnt::Duration,
+        btn_click_debase: rtic::cyccnt::Duration,
+        card_scan_pause: rtic::cyccnt::Duration,
+        user_cyclic_time: rtic::cyccnt::Duration,
     }
 
     #[init(spawn=[start_playlist, user_cyclic])]

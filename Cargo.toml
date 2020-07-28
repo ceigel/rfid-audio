@@ -8,7 +8,7 @@ version = "0.1.0"
 [dependencies]
 cortex-m = "0.6.1"
 cortex-m-semihosting = "0.3.3"
-cortex-m-rtfm = "0.5.1"
+cortex-m-rtic = "0.5.3"
 embedded-mp3 = { version = "0.1.0", path = "../embedded-mp3" }
 panic-itm = "0.4.1"
 embedded-sdmmc = {version="0.3.0", path = "../embedded-sdmmc-rs"}
@@ -18,7 +18,7 @@ mfrc522 = "0.2.0"
 
 [dependencies.stm32f3xx-hal]
 features = ["stm32f303xc", "rt"]
-version = "0.4.3"
+version = "0.5.0"
 path = "../stm32f3xx-hal/"
 
 [dependencies.cast]
