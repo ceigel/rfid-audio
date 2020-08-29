@@ -3,8 +3,8 @@ use crate::sound_device::SoundDevice;
 use crate::MP3_DATA_LENGTH;
 use embedded_mp3 as mp3;
 use log::{debug, error, info};
-use stm32f3xx_hal::prelude::*;
-use stm32f3xx_hal::time;
+use stm32l4xx_hal::prelude::*;
+use stm32l4xx_hal::time;
 
 const MP3_TRIGGER_MOVE: usize = 2 * 1024;
 #[derive(Debug)]

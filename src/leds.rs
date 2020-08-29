@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use hal::gpio::{gpioe, Output, PushPull};
 use hal::prelude::*;
-use stm32f3xx_hal as hal;
+use stm32l4xx_hal as hal;
 
 pub struct RealLeds {
     led_red: gpioe::PE9<Output<PushPull>>,

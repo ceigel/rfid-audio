@@ -22,12 +22,14 @@ use cortex_m_log::destination;
 use cortex_m_log::log::Logger;
 use cortex_m_log::printer::itm::InterruptSync;
 use embedded_hal::digital::v1_compat;
-use hal::gpio::{gpioa, gpiob, Analog, Floating, Input, Output, PullDown, PushPull, AF5};
+use hal::gpio::{
+    gpioa, gpiob, Alternate, Analog, Floating, Input, Output, PullDown, PushPull, AF5,
+};
 use hal::hal as embedded_hal;
-use hal::spi::{Phase, Polarity, Spi};
+use hal::spi::Spi;
 use hal::time::Hertz;
-use stm32f3xx_hal as hal;
-use stm32f3xx_hal::prelude::*;
+use stm32l4xx_hal as hal;
+use stm32l4xx_hal::prelude::*;
 
 use log::{debug, error, info};
 use mfrc522::{self, Mfrc522};
@@ -89,27 +91,32 @@ impl CyclesComputer {
 }
 
 fn init_clocks(
-    cfgr: stm32f3xx_hal::rcc::CFGR,
-    mut flash: stm32f3xx_hal::flash::Parts,
+    cfgr: hal::rcc::CFGR,
+    mut flash: hal::flash::Parts,
+    mut pwr: hal::pwr::Pwr,
 ) -> hal::rcc::Clocks {
-    cfgr.use_hse(8.mhz())
-        .sysclk(72.mhz())
-        .hclk(72.mhz())
-        .pclk2(72.mhz())
-        .pclk1(36.mhz())
-        .freeze(&mut flash.acr)
+    cfgr.hse(
+        8.mhz(),
+        hal::rcc::CrystalBypass::Disable,
+        hal::rcc::ClockSecuritySystem::Disable,
+    )
+    .sysclk(72.mhz())
+    .hclk(72.mhz())
+    .pclk2(72.mhz())
+    .pclk1(36.mhz())
+    .freeze(&mut flash.acr, &mut pwr)
 }
 
 type Spi1Pins = (
-    hal::gpio::gpioa::PA5<AF5>,
-    hal::gpio::gpioa::PA6<AF5>,
-    hal::gpio::gpioa::PA7<AF5>,
+    gpioa::PA5<Alternate<AF5, Input<Floating>>>,
+    gpioa::PA6<Alternate<AF5, Input<Floating>>>,
+    gpioa::PA7<Alternate<AF5, Input<Floating>>>,
 );
 
 type Spi2Pins = (
-    hal::gpio::gpiob::PB13<AF5>,
-    hal::gpio::gpiob::PB14<AF5>,
-    hal::gpio::gpiob::PB15<AF5>,
+    gpiob::PB13<Alternate<AF5, Input<Floating>>>,
+    gpiob::PB14<Alternate<AF5, Input<Floating>>>,
+    gpiob::PB15<Alternate<AF5, Input<Floating>>>,
 );
 pub(crate) type Spi1Type = Spi<hal::stm32::SPI1, Spi1Pins>;
 pub(crate) type Spi2Type = Spi<hal::stm32::SPI2, Spi2Pins>;
@@ -129,38 +136,40 @@ fn init_spi1(
     let miso = miso.into_af5(moder, afrl);
     let mosi = mosi.into_af5(moder, afrl);
     let spi_mode = embedded_hal::spi::Mode {
-        polarity: Polarity::IdleLow,
-        phase: Phase::CaptureOnFirstTransition,
+        polarity: embedded_hal::spi::Polarity::IdleLow,
+        phase: embedded_hal::spi::Phase::CaptureOnFirstTransition,
     };
 
     let spi = Spi::spi1(spi1, (sck, miso, mosi), spi_mode, freq, *clocks, apb2);
     spi
 }
 
-type RFIDReaderType = Mfrc522<Spi2Type, v1_compat::OldOutputPin<hal::gpio::PXx<Output<PushPull>>>>;
+type RFIDReaderType = Mfrc522<Spi2Type, v1_compat::OldOutputPin<gpioa::PA8<Output<PushPull>>>>;
 
-fn init_rfid_reader(
+fn init_spi2(
     spi2: hal::stm32::SPI2,
-    mut gpiob: gpiob::Parts,
-    apb1: &mut hal::rcc::APB1,
+    sck: gpiob::PB13<Input<Floating>>,
+    miso: gpiob::PB14<Input<Floating>>,
+    mosi: gpiob::PB15<Input<Floating>>,
+    moder: &mut gpiob::MODER,
+    afrh: &mut gpiob::AFRH,
+    apb1: &mut hal::rcc::APB1R1,
     clocks: &hal::rcc::Clocks,
-) -> RFIDReaderType {
-    let cs2 = gpiob
-        .pb12
-        .into_push_pull_output(&mut gpiob.moder, &mut gpiob.otyper)
-        .downgrade()
-        .downgrade();
-    let spi2 = init_spi2(
-        spi2,
-        gpiob.pb13,
-        gpiob.pb14,
-        gpiob.pb15,
-        &mut gpiob.moder,
-        &mut gpiob.afrh,
-        apb1,
-        &clocks,
-        400.khz(),
-    );
+    freq: impl Into<Hertz>,
+) -> Spi2Type {
+    let sck = sck.into_af5(moder, afrh);
+    let miso = miso.into_af5(moder, afrh);
+    let mosi = mosi.into_af5(moder, afrh);
+    let spi_mode = embedded_hal::spi::Mode {
+        polarity: embedded_hal::spi::Polarity::IdleLow,
+        phase: embedded_hal::spi::Phase::CaptureOnFirstTransition,
+    };
+
+    let spi = Spi::spi2(spi2, (sck, miso, mosi), spi_mode, freq, *clocks, apb1);
+    spi
+}
+
+fn init_rfid_reader(spi2: Spi2Type, cs2: gpioa::PA8<Output<PushPull>>) -> RFIDReaderType {
     let rfid_reader =
         Mfrc522::new(spi2, v1_compat::OldOutputPin::new(cs2)).and_then(|mut rfid_reader| {
             let version = rfid_reader.version()?;
@@ -177,30 +186,6 @@ fn init_rfid_reader(
         Err(e) => panic!("Can't initialize RFID reader, error: {:?}", e),
     }
 }
-
-fn init_spi2(
-    spi2: hal::stm32::SPI2,
-    sck: gpiob::PB13<Input<Floating>>,
-    miso: gpiob::PB14<Input<Floating>>,
-    mosi: gpiob::PB15<Input<Floating>>,
-    moder: &mut gpiob::MODER,
-    afrh: &mut gpiob::AFRH,
-    apb1: &mut hal::rcc::APB1,
-    clocks: &hal::rcc::Clocks,
-    freq: impl Into<Hertz>,
-) -> Spi2Type {
-    let sck = sck.into_af5(moder, afrh);
-    let miso = miso.into_af5(moder, afrh);
-    let mosi = mosi.into_af5(moder, afrh);
-    let spi_mode = embedded_hal::spi::Mode {
-        polarity: Polarity::IdleLow,
-        phase: Phase::CaptureOnFirstTransition,
-    };
-
-    let spi = Spi::spi2(spi2, (sck, miso, mosi), spi_mode, freq, *clocks, apb1);
-    spi
-}
-
 fn config_exti(exti: hal::stm32::EXTI, syscfg: &hal::stm32::SYSCFG) -> hal::stm32::EXTI {
     syscfg.exticr1.modify(|_, w| unsafe {
         w.exti0().bits(0b000);
@@ -232,7 +217,7 @@ fn config_exti(exti: hal::stm32::EXTI, syscfg: &hal::stm32::SYSCFG) -> hal::stm3
 pub struct PlayingResources {
     pub sound_device: SoundDevice<'static>,
     pub mp3_player: Mp3Player<'static>,
-    pub card_reader: SdCardReader<hal::gpio::PXx<Output<PushPull>>>,
+    pub card_reader: SdCardReader<hal::gpio::gpioa::PA3<Output<PushPull>>>,
 }
 
 pub enum ButtonKind {
@@ -254,22 +239,22 @@ impl ButtonKind {
 }
 
 pub struct Buttons {
-    pub button_next: gpioa::PAx<Input<PullDown>>,
-    pub button_prev: gpioa::PAx<Input<PullDown>>,
-    pub button_pause: gpioa::PAx<Input<PullDown>>,
+    pub button_next: gpiob::PB2<Input<PullDown>>,
+    pub button_prev: gpiob::PB12<Input<PullDown>>,
+    pub button_pause: gpiob::PB10<Input<PullDown>>,
 }
 
 impl Buttons {
     pub fn new(
-        pa0: gpioa::PA0<Input<Floating>>,
-        pa1: gpioa::PA1<Input<Floating>>,
-        pa3: gpioa::PA3<Input<Floating>>,
-        moder: &mut gpioa::MODER,
-        pupdr: &mut gpioa::PUPDR,
+        prev: gpiob::PB12<Input<Floating>>,
+        pause: gpiob::PB10<Input<Floating>>,
+        next: gpiob::PB2<Input<Floating>>,
+        moder: &mut gpiob::MODER,
+        pupdr: &mut gpiob::PUPDR,
     ) -> Self {
-        let button_next = pa0.into_pull_down_input(moder, pupdr).downgrade();
-        let button_prev = pa1.into_pull_down_input(moder, pupdr).downgrade();
-        let button_pause = pa3.into_pull_down_input(moder, pupdr).downgrade();
+        let button_next = next.into_pull_down_input(moder, pupdr);
+        let button_prev = prev.into_pull_down_input(moder, pupdr);
+        let button_pause = pause.into_pull_down_input(moder, pupdr);
 
         Buttons {
             button_next,
@@ -284,7 +269,7 @@ fn rfid_read_card(rfid_reader: &mut RFIDReaderType) -> Option<mfrc522::Uid> {
     atqa.and_then(|atqa| rfid_reader.select(&atqa)).ok()
 }
 
-#[app(device = stm32f3xx_hal::stm32, monotonic = rtic::cyccnt::CYCCNT, peripherals = true)]
+#[app(device = stm32l4xx_hal::stm32, monotonic = rtic::cyccnt::CYCCNT, peripherals = true)]
 const APP: () = {
     struct Resources {
         playing_resources: PlayingResources,
@@ -292,7 +277,7 @@ const APP: () = {
         #[init(None)]
         current_playlist: Option<Playlist>,
         buttons: Buttons,
-        rfid_reader: Mfrc522<Spi2Type, v1_compat::OldOutputPin<hal::gpio::PXx<Output<PushPull>>>>,
+        rfid_reader: RFIDReaderType,
         leds: Leds,
         exti: hal::stm32::EXTI,
         btn_click_debase: rtic::cyccnt::Duration,
@@ -308,9 +293,10 @@ const APP: () = {
 
         let device = cx.device;
 
-        let flash = device.FLASH.constrain();
         let mut rcc = device.RCC.constrain();
-        let clocks = init_clocks(rcc.cfgr, flash);
+        let flash = device.FLASH.constrain();
+        let pwr = device.PWR.constrain(&mut rcc.apb1r1);
+        let clocks = init_clocks(rcc.cfgr, flash, pwr);
 
         let logger: &Logger<InterruptSync> = unsafe {
             LOGGER.replace(Logger {
@@ -321,22 +307,21 @@ const APP: () = {
         };
         cortex_m_log::log::init(logger).expect("To set logger");
 
-        let mut gpioa = device.GPIOA.split(&mut rcc.ahb);
+        let mut gpiob = device.GPIOB.split(&mut rcc.ahb2);
         let buttons = Buttons::new(
-            gpioa.pa0,
-            gpioa.pa1,
-            gpioa.pa3,
-            &mut gpioa.moder,
-            &mut gpioa.pupdr,
+            gpiob.pb12,
+            gpiob.pb10,
+            gpiob.pb2,
+            &mut gpiob.moder,
+            &mut gpiob.pupdr,
         );
 
+        let mut gpioa = device.GPIOA.split(&mut rcc.ahb2);
         let pa4 = gpioa.pa4.into_analog(&mut gpioa.moder, &mut gpioa.pupdr); // Speaker out
 
         let cs1 = gpioa
-            .pa2
-            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper)
-            .downgrade()
-            .downgrade();
+            .pa3
+            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
 
         let spi1 = init_spi1(
             device.SPI1,
@@ -356,8 +341,23 @@ const APP: () = {
             })
             .expect("To have a sd card reader");
 
-        let gpiob = device.GPIOB.split(&mut rcc.ahb);
-        let rfid_reader = init_rfid_reader(device.SPI2, gpiob, &mut rcc.apb1, &clocks);
+        let cs2 = gpioa
+            .pa8
+            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
+
+        let spi2 = init_spi2(
+            device.SPI2,
+            gpiob.pb13,
+            gpiob.pb14,
+            gpiob.pb15,
+            &mut gpiob.moder,
+            &mut gpiob.afrh,
+            &mut rcc.apb1r1,
+            &clocks,
+            400.khz(),
+        );
+
+        let rfid_reader = init_rfid_reader(spi2, cs2);
 
         let buffers = unsafe { &mut BUFFERS };
         let ccram_buffers = unsafe { &mut CCRAM_BUFFERS };
@@ -376,11 +376,11 @@ const APP: () = {
             &mut buffers.dma_buffer,
             clocks.sysclk(),
             device.TIM2,
-            device.DAC,
+            device.DAC1,
             device.DMA2,
         );
 
-        let leds = Leds::new(device.GPIOE.split(&mut rcc.ahb));
+        let leds = Leds::new(device.GPIOE.split(&mut rcc.ahb2));
         let exti = config_exti(device.EXTI, &device.SYSCFG);
 
         cx.spawn
@@ -627,7 +627,7 @@ const APP: () = {
     }
 
     extern "C" {
-        fn COMP1_2_3();
-        fn COMP4_5_6();
+        fn I2C3_EV();
+        fn I2C3_ER();
     }
 };
