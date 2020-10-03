@@ -23,7 +23,7 @@ use cortex_m_log::log::Logger;
 use cortex_m_log::printer::itm::InterruptSync;
 use embedded_hal::digital::v1_compat;
 use hal::gpio::{
-    gpioa, gpiob, Alternate, Analog, Floating, Input, Output, PullDown, PushPull, AF5,
+    gpioa, gpiob, Alternate, Analog, Floating, Input, OpenDrain, Output, PullDown, PushPull, AF5,
 };
 use hal::hal as embedded_hal;
 use hal::spi::Spi;
@@ -217,7 +217,7 @@ fn config_exti(exti: hal::stm32::EXTI, syscfg: &hal::stm32::SYSCFG) -> hal::stm3
 pub struct PlayingResources {
     pub sound_device: SoundDevice<'static>,
     pub mp3_player: Mp3Player<'static>,
-    pub card_reader: SdCardReader<hal::gpio::gpioa::PA3<Output<PushPull>>>,
+    pub card_reader: SdCardReader<hal::gpio::gpioa::PA3<Output<OpenDrain>>>,
 }
 
 pub enum ButtonKind {
@@ -306,6 +306,7 @@ const APP: () = {
             LOGGER.as_ref().expect("to have a logger")
         };
         cortex_m_log::log::init(logger).expect("To set logger");
+        debug!("Configuring");
 
         let mut gpiob = device.GPIOB.split(&mut rcc.ahb2);
         let buttons = Buttons::new(
@@ -321,7 +322,7 @@ const APP: () = {
 
         let cs1 = gpioa
             .pa3
-            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
+            .into_open_drain_output(&mut gpioa.moder, &mut gpioa.otyper);
 
         let spi1 = init_spi1(
             device.SPI1,
@@ -334,6 +335,8 @@ const APP: () = {
             &clocks,
             400.khz(),
         );
+
+        debug!("Initializing sd-card reader");
         let card_reader = SdCardReader::new(spi1, cs1, 8.mhz(), clocks)
             .map_err(|e| {
                 error!("Card reader init failed: {:?}", e);
@@ -357,6 +360,7 @@ const APP: () = {
             400.khz(),
         );
 
+        debug!("Initializing rfid reader");
         let rfid_reader = init_rfid_reader(spi2, cs2);
 
         let buffers = unsafe { &mut BUFFERS };
@@ -372,6 +376,7 @@ const APP: () = {
             core::mem::size_of::<Buffers>()
         );
 
+        debug!("Initializing sound device");
         let sound_device = SoundDevice::new(
             &mut buffers.dma_buffer,
             clocks.sysclk(),
@@ -383,6 +388,7 @@ const APP: () = {
         let leds = Leds::new(device.GPIOE.split(&mut rcc.ahb2));
         let exti = config_exti(device.EXTI, &device.SYSCFG);
 
+        debug!("Start cyclic task");
         cx.spawn
             //.start_playlist(PlaylistName::from_bytes("87B13133"))
             //.start_playlist(PlaylistName::from_bytes("F460482A"))

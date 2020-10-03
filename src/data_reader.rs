@@ -92,7 +92,7 @@ where
             .device()
             .init()
             .map_err(|e| sdmmc::Error::DeviceError(e))?;
-        controller.device().spi().reclock(freq, clocks);
+        //controller.device().spi().reclock(freq, clocks);
         let volume = controller.get_volume(sdmmc::VolumeIdx(0))?;
         let root_dir = controller.open_root_dir(&volume)?;
         Ok(Self {
