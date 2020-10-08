@@ -273,7 +273,8 @@ fn rfid_read_card(rfid_reader: &mut RFIDReaderType) -> Option<mfrc522::Uid> {
 const APP: () = {
     struct Resources {
         playing_resources: PlayingResources,
-        pa4: gpioa::PA4<Analog>,
+        audio_out: gpioa::PA4<Analog>,
+        audio_en: gpioa::PA12<Output<PushPull>>,
         #[init(None)]
         current_playlist: Option<Playlist>,
         buttons: Buttons,
@@ -318,7 +319,10 @@ const APP: () = {
         );
 
         let mut gpioa = device.GPIOA.split(&mut rcc.ahb2);
-        let pa4 = gpioa.pa4.into_analog(&mut gpioa.moder, &mut gpioa.pupdr); // Speaker out
+        let audio_out = gpioa.pa4.into_analog(&mut gpioa.moder, &mut gpioa.pupdr); // Speaker out
+        let mut audio_en = gpioa
+            .pa12
+            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
 
         let cs1 = gpioa
             .pa3
@@ -401,6 +405,7 @@ const APP: () = {
         let card_scan_pause = time_computer.to_cycles(CARD_SCAN_PAUSE);
         let user_cyclic_time = time_computer.to_cycles(USER_CYCLIC_TIME);
 
+        audio_en.set_high().expect("To be able to set audio_en");
         info!("Init finished");
         init::LateResources {
             playing_resources: PlayingResources {
@@ -408,7 +413,7 @@ const APP: () = {
                 mp3_player,
                 card_reader,
             },
-            pa4,
+            audio_out,
             buttons,
             rfid_reader,
             leds,
