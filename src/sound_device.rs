@@ -20,8 +20,8 @@ fn ahbenr() -> &'static stm32l431::rcc::AHB1ENR {
     unsafe { &(*stm32l431::RCC::ptr()).ahb1enr }
 }
 
-fn enable_dma2_ch3_interrupt() {
-    unsafe { stm32l431::NVIC::unmask(Interrupt::DMA2_CH3) };
+fn enable_dma1_ch3_interrupt() {
+    unsafe { stm32l431::NVIC::unmask(Interrupt::DMA1_CH3) };
 }
 
 #[derive(PartialEq, Debug)]
@@ -53,7 +53,7 @@ impl DebuggingData {
 pub struct SoundDevice<'a> {
     dma_buffer: &'a mut [u16; DMA_LENGTH],
     stop_at_buffer_len: Option<usize>,
-    dma2: stm32l431::DMA2,
+    dma1: stm32l431::DMA1,
     dac: stm32l431::DAC1,
     tim2: stm32l431::TIM2,
     sysclk_freq: time::Hertz,
@@ -68,7 +68,7 @@ impl<'a> SoundDevice<'a> {
         sysclk: time::Hertz,
         tim2: stm32l431::TIM2,
         dac: stm32l431::DAC1,
-        dma2: stm32l431::DMA2,
+        dma1: stm32l431::DMA1,
     ) -> Self {
         let apb1enr = apb1enr();
         let ahbenr = ahbenr();
@@ -76,7 +76,7 @@ impl<'a> SoundDevice<'a> {
             dma_buffer,
             stop_at_buffer_len: None,
             tim2,
-            dma2,
+            dma1,
             dac,
             sysclk_freq: sysclk,
             stopping: false,
@@ -86,7 +86,7 @@ impl<'a> SoundDevice<'a> {
         let apb1rstr = apb1rstr();
         obj.init_tim2(apb1enr, apb1rstr);
         obj.init_dac1(apb1enr);
-        obj.init_dma2(ahbenr);
+        obj.init_dma1(ahbenr);
         obj
     }
 
@@ -106,14 +106,14 @@ impl<'a> SoundDevice<'a> {
         let arr = self.sysclk_freq.0 / freq.0;
         self.tim2.arr.write(|w| w.arr().bits(arr));
         self.tim2.cr1.modify(|_, w| w.cen().enabled());
-        self.dma2.ccr3.modify(|_, w| {
+        self.dma1.ccr3.modify(|_, w| {
             w.circ().enabled();
             w.tcie().enabled();
             w.htie().enabled();
             w.en().enabled()
         });
         let ndt = self.dma_buffer.len() as u16;
-        self.dma2.cndtr3.write(|w| w.ndt().bits(ndt));
+        self.dma1.cndtr3.write(|w| w.ndt().bits(ndt));
         self.stopping = false;
         self.stop_at_buffer_len = None;
         self.play_pause_start.replace(Instant::now());
@@ -159,19 +159,19 @@ impl<'a> SoundDevice<'a> {
     pub fn dma_interrupt(&mut self) -> DmaState {
         // determine dma state
         // cache interrupt status before clearing interrupt flag
-        let isr = self.dma2.isr.read();
+        let isr = self.dma1.isr.read();
 
         // clear interrupt flag and return dma state
         let mut state = if isr.teif3().is_error() {
-            self.dma2.ifcr.write(|w| w.cteif3().clear());
+            self.dma1.ifcr.write(|w| w.cteif3().clear());
             error!("Dma request error. Stop playing");
             self.stop_playing();
             DmaState::Error
         } else if isr.htif3().is_half() {
-            self.dma2.ifcr.write(|w| w.chtif3().clear());
+            self.dma1.ifcr.write(|w| w.chtif3().clear());
             DmaState::HalfTrigger
         } else if isr.tcif3().is_complete() {
-            self.dma2.ifcr.write(|w| w.ctcif3().clear());
+            self.dma1.ifcr.write(|w| w.ctcif3().clear());
             DmaState::TriggerComplete
         } else {
             DmaState::Unknown
@@ -193,27 +193,27 @@ impl<'a> SoundDevice<'a> {
 
     pub fn stop_playing(&mut self) {
         self.tim2.cr1.modify(|_, w| w.cen().disabled());
-        self.dma2.ccr3.modify(|_, w| w.en().disabled());
+        self.dma1.ccr3.modify(|_, w| w.en().disabled());
         self.play_pause_start.take();
     }
 
     pub fn set_dma_stop(&mut self, state: DmaState) -> DmaState {
         self.stopping = true;
         let stop_index = self.stop_at_buffer_len.expect("To have stop_index set");
-        self.dma2.ccr3.modify(|_, w| w.en().disabled());
+        self.dma1.ccr3.modify(|_, w| w.en().disabled());
         if (stop_index == 0 && state == DmaState::TriggerComplete)
             || (stop_index == self.dma_buffer.len() / 2 && state == DmaState::HalfTrigger)
         {
             self.stop_playing();
             DmaState::Stopped
         } else {
-            self.dma2.ccr3.modify(|_, w| {
+            self.dma1.ccr3.modify(|_, w| {
                 w.tcie().enabled(); // trigger an interrupt when transfer is complete
                 w.htie().disabled(); // trigger an interrupt when half the transfer is complete
                 w.circ().disabled() // dma mode is circular
             });
-            self.dma2.cndtr3.write(|w| w.ndt().bits(stop_index as u16));
-            self.dma2.ccr3.modify(|_, w| w.en().enabled());
+            self.dma1.cndtr3.write(|w| w.ndt().bits(stop_index as u16));
+            self.dma1.ccr3.modify(|_, w| w.en().enabled());
             state
         }
     }
@@ -237,16 +237,16 @@ impl<'a> SoundDevice<'a> {
         self.dac.cr.modify(|_, w| w.en1().set_bit());
     }
 
-    pub fn init_dma2(&self, ahbenr: &stm32l431::rcc::AHB1ENR) {
-        ahbenr.modify(|_, w| w.dma2en().set_bit());
+    pub fn init_dma1(&self, ahbenr: &stm32l431::rcc::AHB1ENR) {
+        ahbenr.modify(|_, w| w.dma1en().set_bit());
         let ma = self.dma_buffer.as_ptr() as usize as u32;
         let pa = &self.dac.dhr12r1 as *const stm32l431::dac1::DHR12R1 as usize as u32;
         let ndt = self.dma_buffer.len() as u16;
 
-        self.dma2.cmar3.write(|w| w.ma().bits(ma));
-        self.dma2.cpar3.write(|w| w.pa().bits(pa));
-        self.dma2.cndtr3.write(|w| w.ndt().bits(ndt));
-        self.dma2.ccr3.write(|w| {
+        self.dma1.cmar3.write(|w| w.ma().bits(ma));
+        self.dma1.cpar3.write(|w| w.pa().bits(pa));
+        self.dma1.cndtr3.write(|w| w.ndt().bits(ndt));
+        self.dma1.ccr3.write(|w| {
             w.dir().from_memory(); // source is memory
             w.mem2mem().disabled(); // disable memory to memory transfer
             w.minc().enabled(); // increment memory address every transfer
@@ -260,7 +260,8 @@ impl<'a> SoundDevice<'a> {
             w.htie().enabled(); // trigger an interrupt when half the transfer is complete
             w
         });
-        enable_dma2_ch3_interrupt();
+        enable_dma1_ch3_interrupt();
+        self.dma1.cselr.write(|w| w.c3s().bits(0b0110));
         self.dac.cr.modify(|_, w| w.dmaen1().set_bit());
     }
 }

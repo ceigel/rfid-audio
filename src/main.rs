@@ -23,7 +23,7 @@ use cortex_m_log::log::Logger;
 use cortex_m_log::printer::itm::InterruptSync;
 use embedded_hal::digital::v1_compat;
 use hal::gpio::{
-    gpioa, gpiob, Alternate, Analog, Floating, Input, OpenDrain, Output, PullDown, PushPull, AF5,
+    gpioa, gpiob, Alternate, Analog, Floating, Input, OpenDrain, Output, PullUp, PushPull, AF5,
 };
 use hal::hal as embedded_hal;
 use hal::spi::Spi;
@@ -102,7 +102,7 @@ fn init_clocks(
     )
     .sysclk(72.mhz())
     .hclk(72.mhz())
-    .pclk2(72.mhz())
+    .pclk2(36.mhz())
     .pclk1(36.mhz())
     .freeze(&mut flash.acr, &mut pwr)
 }
@@ -199,13 +199,13 @@ fn config_exti(exti: hal::stm32::EXTI, syscfg: &hal::stm32::SYSCFG) -> hal::stm3
         w.mr3().set_bit();
         w
     });
-    exti.rtsr1.modify(|_, w| {
+    exti.ftsr1.modify(|_, w| {
         w.tr0().set_bit();
         w.tr1().set_bit();
         w.tr3().set_bit();
         w
     });
-    exti.ftsr1.modify(|_, w| {
+    exti.rtsr1.modify(|_, w| {
         w.tr0().clear_bit();
         w.tr1().clear_bit();
         w.tr3().clear_bit();
@@ -239,9 +239,9 @@ impl ButtonKind {
 }
 
 pub struct Buttons {
-    pub button_next: gpiob::PB2<Input<PullDown>>,
-    pub button_prev: gpiob::PB12<Input<PullDown>>,
-    pub button_pause: gpiob::PB10<Input<PullDown>>,
+    pub button_next: gpiob::PB2<Input<PullUp>>,
+    pub button_prev: gpiob::PB12<Input<PullUp>>,
+    pub button_pause: gpiob::PB10<Input<PullUp>>,
 }
 
 impl Buttons {
@@ -252,9 +252,9 @@ impl Buttons {
         moder: &mut gpiob::MODER,
         pupdr: &mut gpiob::PUPDR,
     ) -> Self {
-        let button_next = next.into_pull_down_input(moder, pupdr);
-        let button_prev = prev.into_pull_down_input(moder, pupdr);
-        let button_pause = pause.into_pull_down_input(moder, pupdr);
+        let button_next = next.into_pull_up_input(moder, pupdr);
+        let button_prev = prev.into_pull_up_input(moder, pupdr);
+        let button_pause = pause.into_pull_up_input(moder, pupdr);
 
         Buttons {
             button_next,
@@ -366,7 +366,6 @@ const APP: () = {
 
         debug!("Initializing rfid reader");
         let rfid_reader = init_rfid_reader(spi2, cs2);
-
         let buffers = unsafe { &mut BUFFERS };
         let ccram_buffers = unsafe { &mut CCRAM_BUFFERS };
         let mp3_player = Mp3Player::new(
@@ -386,7 +385,7 @@ const APP: () = {
             clocks.sysclk(),
             device.TIM2,
             device.DAC1,
-            device.DMA2,
+            device.DMA1,
         );
 
         let leds = Leds::new(device.GPIOE.split(&mut rcc.ahb2));
@@ -414,6 +413,7 @@ const APP: () = {
                 card_reader,
             },
             audio_out,
+            audio_en,
             buttons,
             rfid_reader,
             leds,
@@ -600,8 +600,8 @@ const APP: () = {
         }
     }
 
-    #[task(binds = DMA2_CH3, priority=8, resources=[playing_resources], spawn=[process_dma_request])]
-    fn dma2_ch3(cx: dma2_ch3::Context) {
+    #[task(binds = DMA1_CH3, priority=8, resources=[playing_resources], spawn=[process_dma_request])]
+    fn dma1_ch3(cx: dma1_ch3::Context) {
         let pr = cx.resources.playing_resources;
         let state = pr.sound_device.dma_interrupt();
         if cx.spawn.process_dma_request(state).is_err() {
