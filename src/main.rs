@@ -41,7 +41,7 @@ const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Debug;
 const MP3_DATA_LENGTH: usize = 10 * 1024;
 const USER_CYCLIC_TIME: time::Duration = time::Duration::from_millis(125);
 const CARD_SCAN_PAUSE: time::Duration = time::Duration::from_millis(1000);
-const BTN_CLICK_DEBASE: time::Duration = time::Duration::from_millis(100);
+const BTN_CLICK_DEBASE: time::Duration = time::Duration::from_millis(500);
 
 struct CCRamBuffers {
     pub mp3_decoder_data: mp3::DecoderData,
@@ -71,7 +71,6 @@ impl Buffers {
     }
 }
 static mut BUFFERS: Buffers = Buffers::new();
-#[link_section = ".ccram_data"]
 static mut CCRAM_BUFFERS: CCRamBuffers = CCRamBuffers::new();
 
 pub struct CyclesComputer {
@@ -188,27 +187,33 @@ fn init_rfid_reader(spi2: Spi2Type, cs2: gpioa::PA8<Output<PushPull>>) -> RFIDRe
 }
 fn config_exti(exti: hal::stm32::EXTI, syscfg: &hal::stm32::SYSCFG) -> hal::stm32::EXTI {
     syscfg.exticr1.modify(|_, w| unsafe {
-        w.exti0().bits(0b000);
-        w.exti1().bits(0b000);
-        w.exti3().bits(0b000);
+        w.exti2().bits(0b001); //PB2, button_next
+        w
+    });
+    syscfg.exticr3.modify(|_, w| unsafe {
+        w.exti10().bits(0b001); // PB10 button_pause
+        w
+    });
+    syscfg.exticr4.modify(|_, w| unsafe {
+        w.exti12().bits(0b001); // PB12 button_prev
         w
     });
     exti.imr1.modify(|_, w| {
-        w.mr0().set_bit();
-        w.mr1().set_bit();
-        w.mr3().set_bit();
+        w.mr12().set_bit();
+        w.mr10().set_bit();
+        w.mr2().set_bit();
         w
     });
     exti.ftsr1.modify(|_, w| {
-        w.tr0().set_bit();
-        w.tr1().set_bit();
-        w.tr3().set_bit();
+        w.tr12().set_bit();
+        w.tr10().set_bit();
+        w.tr2().set_bit();
         w
     });
     exti.rtsr1.modify(|_, w| {
-        w.tr0().clear_bit();
-        w.tr1().clear_bit();
-        w.tr3().clear_bit();
+        w.tr12().set_bit();
+        w.tr10().set_bit();
+        w.tr2().set_bit();
         w
     });
     exti
@@ -224,18 +229,6 @@ pub enum ButtonKind {
     Previous,
     Pause,
     Next,
-}
-
-impl ButtonKind {
-    pub fn new(interrupt: hal::stm32::Interrupt) -> Self {
-        use hal::stm32::Interrupt;
-        match interrupt {
-            Interrupt::EXTI0 => ButtonKind::Next,
-            Interrupt::EXTI1 => ButtonKind::Previous,
-            Interrupt::EXTI3 => ButtonKind::Pause,
-            _ => panic!("Interrupt not mappable to a button"),
-        }
-    }
 }
 
 pub struct Buttons {
@@ -280,7 +273,7 @@ const APP: () = {
         buttons: Buttons,
         rfid_reader: RFIDReaderType,
         leds: Leds,
-        exti: hal::stm32::EXTI,
+        //exti: hal::stm32::EXTI,
         btn_click_debase: rtic::cyccnt::Duration,
         card_scan_pause: rtic::cyccnt::Duration,
         user_cyclic_time: rtic::cyccnt::Duration,
@@ -324,9 +317,10 @@ const APP: () = {
             .pa12
             .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
 
-        let cs1 = gpioa
+        let mut cs1 = gpioa
             .pa3
             .into_open_drain_output(&mut gpioa.moder, &mut gpioa.otyper);
+        cs1.set_low().expect("To be able to set CS1 to low");
 
         let spi1 = init_spi1(
             device.SPI1,
@@ -389,7 +383,7 @@ const APP: () = {
         );
 
         let leds = Leds::new(device.GPIOE.split(&mut rcc.ahb2));
-        let exti = config_exti(device.EXTI, &device.SYSCFG);
+        //let exti = config_exti(device.EXTI, &device.SYSCFG);
 
         debug!("Start cyclic task");
         cx.spawn
@@ -417,7 +411,7 @@ const APP: () = {
             buttons,
             rfid_reader,
             leds,
-            exti,
+            //exti,
             btn_click_debase,
             card_scan_pause,
             user_cyclic_time,
@@ -430,7 +424,7 @@ const APP: () = {
         loop {}
     }
 
-    #[task(resources=[playing_resources, user_cyclic_time, rfid_reader], priority=8, spawn=[start_playlist], schedule=[user_cyclic])]
+    #[task(resources=[playing_resources, user_cyclic_time, rfid_reader, buttons, btn_click_debase], priority=8, spawn=[start_playlist], schedule=[user_cyclic, btn_pressed])]
     fn user_cyclic(cx: user_cyclic::Context) {
         let mut uid_hex: [u8; 8] = [0; 8];
         if let Some(uid) = rfid_read_card(cx.resources.rfid_reader) {
@@ -438,6 +432,19 @@ const APP: () = {
             let next_playlist = PlaylistName::from_bytes(&uid_hex[..]);
             cx.spawn.start_playlist(next_playlist).ok();
         }
+
+        let btns = cx.resources.buttons;
+        let sched_next = cx.scheduled + *cx.resources.btn_click_debase;
+        if btns.button_next.is_low().expect("To read button next") {
+            cx.schedule.btn_pressed(sched_next, ButtonKind::Next).ok();
+        } else if btns.button_prev.is_low().expect("To read button prev") {
+            cx.schedule
+                .btn_pressed(sched_next, ButtonKind::Previous)
+                .ok();
+        } else if btns.button_pause.is_low().expect("To read button pause") {
+            cx.schedule.btn_pressed(sched_next, ButtonKind::Pause).ok();
+        }
+
         let user_cyclic_time = *cx.resources.user_cyclic_time;
         cx.schedule
             .user_cyclic(cx.scheduled + user_cyclic_time)
@@ -609,33 +616,31 @@ const APP: () = {
         }
     }
 
-    #[task(binds = EXTI0, resources=[btn_click_debase, exti], schedule=[btn_pressed])]
-    fn exti0(cx: exti0::Context) {
-        debug!("in exti0");
-        cx.resources.exti.pr1.modify(|_, w| w.pr0().set_bit());
-        let sched_next = cx.start + *cx.resources.btn_click_debase;
-        cx.schedule
-            .btn_pressed(sched_next, ButtonKind::new(hal::stm32::Interrupt::EXTI0))
-            .ok();
+    /*
+    #[task(binds = EXTI2, resources=[btn_click_debase, exti], schedule=[btn_pressed])]
+    fn exti2(cx: exti2::Context) {
+        if cx.resources.exti.pr1.read().pr2().bit_is_set() {
+            cx.resources.exti.pr1.modify(|_, w| w.pr2().set_bit());
+            let sched_next = cx.start + *cx.resources.btn_click_debase;
+            cx.schedule.btn_pressed(sched_next, ButtonKind::Next).ok();
+        }
     }
 
-    #[task(binds = EXTI1, resources=[btn_click_debase, exti], schedule=[btn_pressed])]
-    fn exti1(cx: exti1::Context) {
-        cx.resources.exti.pr1.modify(|_, w| w.pr1().set_bit());
+    #[task(binds = EXTI15_10, resources=[btn_click_debase, exti], schedule=[btn_pressed])]
+    fn exti5_10(cx: exti5_10::Context) {
         let sched_next = cx.start + *cx.resources.btn_click_debase;
-        cx.schedule
-            .btn_pressed(sched_next, ButtonKind::new(hal::stm32::Interrupt::EXTI1))
-            .ok();
+        if cx.resources.exti.pr1.read().pr10().bit_is_set() {
+            cx.resources.exti.pr1.modify(|_, w| w.pr10().set_bit());
+            cx.schedule.btn_pressed(sched_next, ButtonKind::Pause).ok();
+        }
+        if cx.resources.exti.pr1.read().pr12().bit_is_set() {
+            cx.resources.exti.pr1.modify(|_, w| w.pr12().set_bit());
+            cx.schedule
+                .btn_pressed(sched_next, ButtonKind::Previous)
+                .ok();
+        }
     }
-
-    #[task(binds = EXTI3, resources=[btn_click_debase, exti], schedule=[btn_pressed])]
-    fn exti3(cx: exti3::Context) {
-        cx.resources.exti.pr1.modify(|_, w| w.pr2().set_bit());
-        let sched_next = cx.start + *cx.resources.btn_click_debase;
-        cx.schedule
-            .btn_pressed(sched_next, ButtonKind::new(hal::stm32::Interrupt::EXTI3))
-            .ok();
-    }
+    */
 
     extern "C" {
         fn I2C3_EV();

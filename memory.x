@@ -1,16 +1,16 @@
 MEMORY
 {
-  /* NOTE 1 K = 1 KiBi = 1024 bytes */
-  CCRAM : ORIGIN = 0x10000000, LENGTH = 8K
-  FLASH : ORIGIN = 0x08000000, LENGTH = 256K
-  RAM : ORIGIN = 0x20000000, LENGTH = 40K
+  /* NOTE K = KiBi = 1024 bytes */
+  /* TODO Adjust these memory regions to match your device memory layout */
+  FLASH : ORIGIN = 0x8000000, LENGTH = 256K 
+  RAM : ORIGIN = 0x20000000, LENGTH = 64K
 }
 
 /* This is where the call stack will be allocated. */
 /* The stack is of the full descending type. */
 /* You may want to use this variable to locate the call stack and static
    variables in different memory regions. Below is shown the default value */
-//_stack_start = ORIGIN(CCRAM) + LENGTH(CCRAM);
+/* _stack_start = ORIGIN(RAM) + LENGTH(RAM); */
 
 /* You can use this symbol to customize the location of the .text section */
 /* If omitted the .text section will be placed right after the .vector_table
@@ -19,14 +19,5 @@ MEMORY
    after the vector table */
 /* _stext = ORIGIN(FLASH) + 0x400; */
 
-/* Example of putting non-initialized variables into custom RAM locations. */
-/* This assumes you have defined a region RAM2 above, and in the Rust
-   sources added the attribute `#[link_section = ".ram2bss"]` to the data
-   you want to place there. */
-/* Note that the section will not be zero-initialized by the runtime! */
-SECTIONS {
-     .ccram_data  : ALIGN(4) {
-       *(.ccram_data);
-       . = ALIGN(4);
-     } > CCRAM
-   };
+/* Size of the heap (in bytes) */
+/* _heap_size = 1024; */
