@@ -38,7 +38,7 @@ use rtic::cyccnt::U32Ext;
 
 static mut LOGGER: Option<Logger<InterruptSync>> = None;
 const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Debug;
-const MP3_DATA_LENGTH: usize = 10 * 1024;
+const MP3_DATA_LENGTH: usize = 18 * 1024;
 const USER_CYCLIC_TIME: time::Duration = time::Duration::from_millis(125);
 const CARD_SCAN_PAUSE: time::Duration = time::Duration::from_millis(1000);
 const BTN_CLICK_DEBASE: time::Duration = time::Duration::from_millis(500);
@@ -101,8 +101,8 @@ fn init_clocks(
     )
     .sysclk(72.mhz())
     .hclk(72.mhz())
-    .pclk2(36.mhz())
-    .pclk1(36.mhz())
+    .pclk2(72.mhz())
+    .pclk1(72.mhz())
     .freeze(&mut flash.acr, &mut pwr)
 }
 
@@ -185,39 +185,6 @@ fn init_rfid_reader(spi2: Spi2Type, cs2: gpioa::PA8<Output<PushPull>>) -> RFIDRe
         Err(e) => panic!("Can't initialize RFID reader, error: {:?}", e),
     }
 }
-fn config_exti(exti: hal::stm32::EXTI, syscfg: &hal::stm32::SYSCFG) -> hal::stm32::EXTI {
-    syscfg.exticr1.modify(|_, w| unsafe {
-        w.exti2().bits(0b001); //PB2, button_next
-        w
-    });
-    syscfg.exticr3.modify(|_, w| unsafe {
-        w.exti10().bits(0b001); // PB10 button_pause
-        w
-    });
-    syscfg.exticr4.modify(|_, w| unsafe {
-        w.exti12().bits(0b001); // PB12 button_prev
-        w
-    });
-    exti.imr1.modify(|_, w| {
-        w.mr12().set_bit();
-        w.mr10().set_bit();
-        w.mr2().set_bit();
-        w
-    });
-    exti.ftsr1.modify(|_, w| {
-        w.tr12().set_bit();
-        w.tr10().set_bit();
-        w.tr2().set_bit();
-        w
-    });
-    exti.rtsr1.modify(|_, w| {
-        w.tr12().set_bit();
-        w.tr10().set_bit();
-        w.tr2().set_bit();
-        w
-    });
-    exti
-}
 
 pub struct PlayingResources {
     pub sound_device: SoundDevice<'static>,
@@ -273,7 +240,6 @@ const APP: () = {
         buttons: Buttons,
         rfid_reader: RFIDReaderType,
         leds: Leds,
-        //exti: hal::stm32::EXTI,
         btn_click_debase: rtic::cyccnt::Duration,
         card_scan_pause: rtic::cyccnt::Duration,
         user_cyclic_time: rtic::cyccnt::Duration,
@@ -383,7 +349,6 @@ const APP: () = {
         );
 
         let leds = Leds::new(device.GPIOE.split(&mut rcc.ahb2));
-        //let exti = config_exti(device.EXTI, &device.SYSCFG);
 
         debug!("Start cyclic task");
         cx.spawn
@@ -411,7 +376,6 @@ const APP: () = {
             buttons,
             rfid_reader,
             leds,
-            //exti,
             btn_click_debase,
             card_scan_pause,
             user_cyclic_time,
@@ -615,32 +579,6 @@ const APP: () = {
             error!("Spawn error. Stop playing!");
         }
     }
-
-    /*
-    #[task(binds = EXTI2, resources=[btn_click_debase, exti], schedule=[btn_pressed])]
-    fn exti2(cx: exti2::Context) {
-        if cx.resources.exti.pr1.read().pr2().bit_is_set() {
-            cx.resources.exti.pr1.modify(|_, w| w.pr2().set_bit());
-            let sched_next = cx.start + *cx.resources.btn_click_debase;
-            cx.schedule.btn_pressed(sched_next, ButtonKind::Next).ok();
-        }
-    }
-
-    #[task(binds = EXTI15_10, resources=[btn_click_debase, exti], schedule=[btn_pressed])]
-    fn exti5_10(cx: exti5_10::Context) {
-        let sched_next = cx.start + *cx.resources.btn_click_debase;
-        if cx.resources.exti.pr1.read().pr10().bit_is_set() {
-            cx.resources.exti.pr1.modify(|_, w| w.pr10().set_bit());
-            cx.schedule.btn_pressed(sched_next, ButtonKind::Pause).ok();
-        }
-        if cx.resources.exti.pr1.read().pr12().bit_is_set() {
-            cx.resources.exti.pr1.modify(|_, w| w.pr12().set_bit());
-            cx.schedule
-                .btn_pressed(sched_next, ButtonKind::Previous)
-                .ok();
-        }
-    }
-    */
 
     extern "C" {
         fn I2C3_EV();
