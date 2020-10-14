@@ -2,6 +2,8 @@ use crate::data_reader::{DataReader, DirectoryNavigator};
 use crate::mp3_player::{Mp3Player, PlayError};
 use log::{error, info};
 use rtic::cyccnt::{Duration, Instant};
+use stm32l4xx_hal::gpio::{gpioa, Output, PushPull};
+use stm32l4xx_hal::prelude::OutputPin;
 use stm32l4xx_hal::stm32 as stm32l431;
 use stm32l4xx_hal::stm32::Interrupt;
 use stm32l4xx_hal::time;
@@ -60,6 +62,7 @@ pub struct SoundDevice<'a> {
     pub stopping: bool,
     pub debug_data: DebuggingData,
     play_pause_start: Option<Instant>,
+    audio_en: gpioa::PA12<Output<PushPull>>,
 }
 
 impl<'a> SoundDevice<'a> {
@@ -69,6 +72,7 @@ impl<'a> SoundDevice<'a> {
         tim2: stm32l431::TIM2,
         dac: stm32l431::DAC1,
         dma1: stm32l431::DMA1,
+        audio_en: gpioa::PA12<Output<PushPull>>,
     ) -> Self {
         let apb1enr = apb1enr();
         let ahbenr = ahbenr();
@@ -82,6 +86,7 @@ impl<'a> SoundDevice<'a> {
             stopping: false,
             debug_data: DebuggingData::new(),
             play_pause_start: None,
+            audio_en,
         };
         let apb1rstr = apb1rstr();
         obj.init_tim2(apb1enr, apb1rstr);
@@ -96,7 +101,7 @@ impl<'a> SoundDevice<'a> {
         data_reader: &mut DataReader,
         directory_navigator: &mut impl DirectoryNavigator,
     ) -> Result<(), PlayError> {
-        info!("start playing");
+        info!("start playing called");
         self.stop_playing();
         self.fill_pcm_buffer(0, mp3_player, data_reader, directory_navigator)?;
         self.fill_pcm_buffer(1, mp3_player, data_reader, directory_navigator)?;
@@ -117,6 +122,9 @@ impl<'a> SoundDevice<'a> {
         self.stopping = false;
         self.stop_at_buffer_len = None;
         self.play_pause_start.replace(Instant::now());
+        self.audio_en
+            .set_high()
+            .expect("To be able to set audio_en");
         Ok(())
     }
 
@@ -189,12 +197,21 @@ impl<'a> SoundDevice<'a> {
     }
     pub fn toggle_pause(&mut self) {
         self.tim2.cr1.modify(|r, w| w.cen().bit(!r.cen().bit()));
+        if self.tim2.cr1.read().cen().is_enabled() {
+            self.audio_en.set_high()
+        } else {
+            self.audio_en.set_low()
+        }
+        .expect("To be able to re-set audio_en");
     }
 
     pub fn stop_playing(&mut self) {
         self.tim2.cr1.modify(|_, w| w.cen().disabled());
         self.dma1.ccr3.modify(|_, w| w.en().disabled());
         self.play_pause_start.take();
+        self.audio_en
+            .set_low()
+            .expect("To be able to re-set audio_en");
     }
 
     pub fn set_dma_stop(&mut self, state: DmaState) -> DmaState {
