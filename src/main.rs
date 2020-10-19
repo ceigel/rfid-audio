@@ -4,6 +4,7 @@
 extern crate embedded_mp3 as mp3;
 use panic_itm as _;
 
+mod battery_voltage;
 mod data_reader;
 mod hex;
 mod leds;
@@ -40,6 +41,7 @@ static mut LOGGER: Option<Logger<InterruptSync>> = None;
 const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Debug;
 const MP3_DATA_LENGTH: usize = 18 * 1024;
 const USER_CYCLIC_TIME: time::Duration = time::Duration::from_millis(125);
+const BATTERY_READER_CYCLIC_TIME: time::Duration = time::Duration::from_secs(60 * 5);
 const CARD_SCAN_PAUSE: time::Duration = time::Duration::from_millis(1000);
 const BTN_CLICK_DEBASE: time::Duration = time::Duration::from_millis(500);
 
@@ -241,10 +243,12 @@ const APP: () = {
         leds: Leds,
         btn_click_debase: rtic::cyccnt::Duration,
         card_scan_pause: rtic::cyccnt::Duration,
+        //battery_reader: battery_voltage::BatteryReader,
         user_cyclic_time: rtic::cyccnt::Duration,
+        battery_reader_cyclic_time: rtic::cyccnt::Duration,
     }
 
-    #[init(spawn=[start_playlist, user_cyclic])]
+    #[init(spawn=[start_playlist, user_cyclic, battery_status])]
     fn init(cx: init::Context) -> init::LateResources {
         let mut core = cx.core;
         core.DCB.enable_trace();
@@ -350,6 +354,14 @@ const APP: () = {
 
         let leds = Leds::new(device.GPIOE.split(&mut rcc.ahb2));
 
+        debug!("Init ADC");
+        /*let battery_reader = battery_voltage::BatteryReader::new(
+            gpiob.pb0,
+            device.ADC,
+            &mut gpiob.moder,
+            &mut gpiob.pupdr,
+            &clocks,
+        );*/
         debug!("Start cyclic task");
         cx.spawn
             //.start_playlist(PlaylistName::from_bytes("87B13133"))
@@ -357,11 +369,15 @@ const APP: () = {
             .start_playlist(PlaylistName::from_bytes("02".as_bytes()))
             .expect("To start playlist");
         cx.spawn.user_cyclic().expect("To start cyclic task");
+        cx.spawn
+            .battery_status()
+            .expect("To start battery status task");
 
         let time_computer = CyclesComputer::new(clocks.sysclk());
         let btn_click_debase = time_computer.to_cycles(BTN_CLICK_DEBASE);
         let card_scan_pause = time_computer.to_cycles(CARD_SCAN_PAUSE);
         let user_cyclic_time = time_computer.to_cycles(USER_CYCLIC_TIME);
+        let battery_reader_cyclic_time = time_computer.to_cycles(BATTERY_READER_CYCLIC_TIME);
 
         info!("Init finished");
         init::LateResources {
@@ -376,7 +392,9 @@ const APP: () = {
             leds,
             btn_click_debase,
             card_scan_pause,
+            //battery_reader,
             user_cyclic_time,
+            battery_reader_cyclic_time,
         }
     }
 
@@ -411,6 +429,16 @@ const APP: () = {
         cx.schedule
             .user_cyclic(cx.scheduled + user_cyclic_time)
             .expect("To be able to schedule user_cyclic");
+    }
+
+    #[task(resources=[battery_reader_cyclic_time], schedule=[battery_status])]
+    fn battery_status(cx: battery_status::Context) {
+        info!("Read battery level");
+        //let val = cx.resources.battery_reader.read();
+        //info!("Battery value: {}", val);
+        cx.schedule
+            .battery_status(cx.scheduled + *cx.resources.battery_reader_cyclic_time)
+            .expect("To be able to schedule battery_status");
     }
 
     #[task(resources=[playing_resources], priority=8, spawn=[playlist_next])]
