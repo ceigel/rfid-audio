@@ -41,7 +41,7 @@ static mut LOGGER: Option<Logger<InterruptSync>> = None;
 const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Debug;
 const MP3_DATA_LENGTH: usize = 18 * 1024;
 const USER_CYCLIC_TIME: time::Duration = time::Duration::from_millis(125);
-const BATTERY_READER_CYCLIC_TIME: time::Duration = time::Duration::from_secs(60 * 5);
+const BATTERY_READER_CYCLIC_TIME: time::Duration = time::Duration::from_secs(6);
 const CARD_SCAN_PAUSE: time::Duration = time::Duration::from_millis(1000);
 const BTN_CLICK_DEBASE: time::Duration = time::Duration::from_millis(500);
 
@@ -101,10 +101,11 @@ fn init_clocks(
         hal::rcc::CrystalBypass::Disable,
         hal::rcc::ClockSecuritySystem::Disable,
     )
-    .sysclk(72.mhz())
-    .hclk(72.mhz())
-    .pclk2(72.mhz())
-    .pclk1(72.mhz())
+    .pll_source(hal::rcc::PllSource::HSE)
+    .sysclk(36.mhz())
+    .hclk(36.mhz())
+    .pclk2(36.mhz())
+    .pclk1(36.mhz())
     .freeze(&mut flash.acr, &mut pwr)
 }
 
