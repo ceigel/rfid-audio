@@ -23,9 +23,7 @@ use cortex_m_log::destination;
 use cortex_m_log::log::Logger;
 use cortex_m_log::printer::itm::InterruptSync;
 use embedded_hal::digital::v1_compat;
-use hal::gpio::{
-    gpioa, gpiob, Alternate, Analog, Floating, Input, OpenDrain, Output, PullUp, PushPull, AF5,
-};
+use hal::gpio::{gpioa, gpiob, Alternate, Analog, Floating, Input, Output, PullUp, PushPull, AF5};
 use hal::hal as embedded_hal;
 use hal::spi::Spi;
 use hal::time::Hertz;
@@ -192,7 +190,7 @@ fn init_rfid_reader(spi2: Spi2Type, cs2: gpioa::PA8<Output<PushPull>>) -> RFIDRe
 pub struct PlayingResources {
     pub sound_device: SoundDevice<'static>,
     pub mp3_player: Mp3Player<'static>,
-    pub card_reader: SdCardReader<hal::gpio::gpioa::PA3<Output<OpenDrain>>>,
+    pub card_reader: SdCardReader<hal::gpio::gpioa::PA3<Output<PushPull>>>,
 }
 
 pub enum ButtonKind {
@@ -289,7 +287,7 @@ const APP: () = {
 
         let mut cs1 = gpioa
             .pa3
-            .into_open_drain_output(&mut gpioa.moder, &mut gpioa.otyper);
+            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
         cs1.set_low().expect("To be able to set CS1 to low");
 
         let spi1 = init_spi1(
