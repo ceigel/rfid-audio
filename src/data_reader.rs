@@ -1,13 +1,15 @@
 use crate::hal::hal as embedded_hal;
 use crate::hal::rcc::Clocks;
 use crate::hal::time::Hertz;
-use crate::playlist::Playlist;
+use crate::playlist::{Playlist, PLAYLIST_NAME_LEN};
 use crate::Spi1Type;
 use embedded_sdmmc as sdmmc;
 use log::error;
 
 const LOGGING_FILE: &str = "cards.txt";
 const END_LINE: &str = "\r\n";
+const LOG_LINE_LEN: usize = END_LINE.len() + PLAYLIST_NAME_LEN;
+const MAX_UNKNOWN: usize = 10;
 const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 struct DummyTimeSource {}
 impl sdmmc::TimeSource for DummyTimeSource {
@@ -127,26 +129,72 @@ where
     }
 
     fn directory_not_found(&mut self, directory_name: &str) -> Result<(), FileError> {
+        let mut buf: [u8; sdmmc::Block::LEN] = [0; sdmmc::Block::LEN];
+        let sz_read =
+            match self
+                .controller
+                .find_directory_entry(&self.volume, &self.root_dir, LOGGING_FILE)
+            {
+                Ok(dir_entry) => {
+                    let mut log_file = self.controller.open_dir_entry(
+                        &mut self.volume,
+                        dir_entry,
+                        sdmmc::Mode::ReadOnly,
+                    )?;
+                    if log_file.length() as usize > buf.len() {
+                        log_file
+                            .seek_from_end(buf.len() as u32)
+                            .expect("To be able to seek inside log file");
+                    } else if log_file.length() > 0 {
+                        log_file
+                            .seek_from_start(BOM.len() as u32)
+                            .expect("To be able to seek inside log file");
+                    }
+                    let sz_read = self
+                        .controller
+                        .read(&self.volume, &mut log_file, &mut buf)?;
+                    self.controller.close_file(&self.volume, log_file)?;
+                    sz_read
+                }
+                Err(FileError::FileNotFound) => 0,
+                Err(e) => return Err(e),
+            };
+
+        const WRITE_BUF_LEN: usize = MAX_UNKNOWN * LOG_LINE_LEN + BOM.len();
+        let mut write_buf: [u8; WRITE_BUF_LEN] = [0; WRITE_BUF_LEN];
+
+        let directory_name_bytes = directory_name.as_bytes();
+        let mut cards = buf[..sz_read]
+            .rsplit(|c| *c == '\r' as u8 || *c == '\n' as u8)
+            .filter(|s| s.len() != 0)
+            .take(MAX_UNKNOWN)
+            .filter(|n| *n == directory_name_bytes);
+        let mut write_idx = write_buf.len();
+        while let Some(card) = cards.next() {
+            write_idx -= LOG_LINE_LEN;
+            write_buf[write_idx..write_idx + LOG_LINE_LEN].copy_from_slice(card);
+        }
+        write_idx -= BOM.len();
+        write_buf[write_idx..write_idx + BOM.len()].copy_from_slice(&BOM);
+        /*
+        let all_cards = core::iter::once(directory_name_bytes).chain(cards);
+        let end_bytes = END_LINE.as_bytes();
+        cards.fold((write_buf, BOM.len()), |(mut buf, idx), card_bytes| {
+            let end = idx + card_bytes.len();
+            buf[idx..end].copy_from_slice(card_bytes);
+            buf[end..(end + end_bytes.len())].copy_from_slice(end_bytes);
+            (buf, idx + end + end_bytes.len())
+        });
+        */
         let mut log_file = self.controller.open_file_in_dir(
             &mut self.volume,
             &self.root_dir,
             LOGGING_FILE,
-            sdmmc::Mode::ReadWriteCreateOrAppend,
+            sdmmc::Mode::ReadWriteCreateOrTruncate,
         )?;
-        let mut res: Result<usize, FileError> = Ok(0);
-        if log_file.length() == 0 {
-            res = self.controller.write(&mut self.volume, &mut log_file, &BOM);
-        }
-        res = res.and_then(|_| {
-            self.controller
-                .write(&mut self.volume, &mut log_file, directory_name.as_bytes())
-        });
-        res = res.and_then(|_| {
-            self.controller
-                .write(&mut self.volume, &mut log_file, END_LINE.as_bytes())
-        });
-        let res2 = self.controller.close_file(&self.volume, log_file);
-        res.and(res2)
+        self.controller
+            .write(&mut self.volume, &mut log_file, &write_buf[write_idx..])?;
+        Ok(())
     }
 }
 

@@ -1,6 +1,7 @@
 use crate::data_reader::{DataReader, DirectoryNavigator, FileError};
 use embedded_sdmmc as sdmmc;
 
+pub const PLAYLIST_NAME_LEN: usize = 8;
 #[derive(PartialEq)]
 pub enum PlaylistMoveDirection {
     Next,
@@ -9,7 +10,7 @@ pub enum PlaylistMoveDirection {
 
 #[derive(Clone, Debug)]
 pub struct PlaylistName {
-    pub name: [u8; 8],
+    pub name: [u8; PLAYLIST_NAME_LEN],
     pub name_len: usize,
 }
 

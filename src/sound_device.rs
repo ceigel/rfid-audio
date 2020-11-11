@@ -260,8 +260,8 @@ impl<'a> SoundDevice<'a> {
         let pa = &self.dac.dhr12r1 as *const stm32l431::dac1::DHR12R1 as usize as u32;
         let ndt = self.dma_buffer.len() as u16;
 
-        self.dma1.cmar3.write(|w| w.ma().bits(ma));
-        self.dma1.cpar3.write(|w| w.pa().bits(pa));
+        self.dma1.cmar3.write(|w| unsafe { w.ma().bits(ma) });
+        self.dma1.cpar3.write(|w| unsafe { w.pa().bits(pa) });
         self.dma1.cndtr3.write(|w| w.ndt().bits(ndt));
         self.dma1.ccr3.write(|w| {
             w.dir().from_memory(); // source is memory

@@ -23,7 +23,9 @@ use cortex_m_log::destination;
 use cortex_m_log::log::Logger;
 use cortex_m_log::printer::itm::InterruptSync;
 use embedded_hal::digital::v1_compat;
-use hal::gpio::{gpioa, gpiob, Alternate, Analog, Floating, Input, Output, PullUp, PushPull, AF5};
+use hal::gpio::{
+    gpioa, gpiob, Alternate, Analog, Floating, Input, OpenDrain, Output, PullUp, PushPull, AF5,
+};
 use hal::hal as embedded_hal;
 use hal::spi::Spi;
 use hal::time::Hertz;
@@ -190,7 +192,7 @@ fn init_rfid_reader(spi2: Spi2Type, cs2: gpioa::PA8<Output<PushPull>>) -> RFIDRe
 pub struct PlayingResources {
     pub sound_device: SoundDevice<'static>,
     pub mp3_player: Mp3Player<'static>,
-    pub card_reader: SdCardReader<hal::gpio::gpioa::PA3<Output<PushPull>>>,
+    pub card_reader: SdCardReader<hal::gpio::gpioa::PA3<Output<OpenDrain>>>,
 }
 
 pub enum ButtonKind {
@@ -270,25 +272,12 @@ const APP: () = {
         cortex_m_log::log::init(logger).expect("To set logger");
         debug!("Configuring");
 
-        let mut gpiob = device.GPIOB.split(&mut rcc.ahb2);
-        let buttons = Buttons::new(
-            gpiob.pb12,
-            gpiob.pb10,
-            gpiob.pb2,
-            &mut gpiob.moder,
-            &mut gpiob.pupdr,
-        );
-
         let mut gpioa = device.GPIOA.split(&mut rcc.ahb2);
+
         let audio_out = gpioa.pa4.into_analog(&mut gpioa.moder, &mut gpioa.pupdr); // Speaker out
         let audio_en = gpioa
             .pa12
             .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
-
-        let mut cs1 = gpioa
-            .pa3
-            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
-        cs1.set_low().expect("To be able to set CS1 to low");
 
         let spi1 = init_spi1(
             device.SPI1,
@@ -299,8 +288,11 @@ const APP: () = {
             &mut gpioa.afrl,
             &mut rcc.apb2,
             &clocks,
-            400.khz(),
+            250.khz(),
         );
+        let cs1 = gpioa
+            .pa3
+            .into_open_drain_output(&mut gpioa.moder, &mut gpioa.otyper);
 
         debug!("Initializing sd-card reader");
         let card_reader = SdCardReader::new(spi1, cs1, 8.mhz(), clocks)
@@ -309,6 +301,16 @@ const APP: () = {
                 e
             })
             .expect("To have a sd card reader");
+
+        debug!("Initializing buttons");
+        let mut gpiob = device.GPIOB.split(&mut rcc.ahb2);
+        let buttons = Buttons::new(
+            gpiob.pb12,
+            gpiob.pb10,
+            gpiob.pb2,
+            &mut gpiob.moder,
+            &mut gpiob.pupdr,
+        );
 
         let cs2 = gpioa
             .pa8
@@ -363,9 +365,9 @@ const APP: () = {
         );*/
         debug!("Start cyclic task");
         cx.spawn
-            //.start_playlist(PlaylistName::from_bytes("87B13133"))
-            //.start_playlist(PlaylistName::from_bytes("F460482A"))
-            .start_playlist(PlaylistName::from_bytes("02".as_bytes()))
+            .start_playlist(PlaylistName::from_bytes("87B13133".as_bytes()))
+            //.start_playlist(PlaylistName::from_bytes("F460482A".as_bytes()))
+            //.start_playlist(PlaylistName::from_bytes("02".as_bytes()))
             .expect("To start playlist");
         cx.spawn.user_cyclic().expect("To start cyclic task");
         cx.spawn
