@@ -35,6 +35,7 @@ use log::{debug, error, info};
 use mfrc522::{self, Mfrc522};
 use rtic::app;
 use rtic::cyccnt::U32Ext;
+use stm32l4xx_hal::stm32 as stm32l431;
 
 static mut LOGGER: Option<Logger<InterruptSync>> = None;
 const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Debug;
@@ -44,6 +45,9 @@ const BATTERY_READER_CYCLIC_TIME: time::Duration = time::Duration::from_secs(6);
 const CARD_SCAN_PAUSE: time::Duration = time::Duration::from_millis(1000);
 const BTN_CLICK_DEBASE: time::Duration = time::Duration::from_millis(500);
 
+fn gpioa_pupdr() -> &'static stm32l431::gpioa::PUPDR {
+    unsafe { &(*stm32l431::GPIOA::ptr()).pupdr }
+}
 struct CCRamBuffers {
     pub mp3_decoder_data: mp3::DecoderData,
 }
@@ -257,10 +261,6 @@ const APP: () = {
         let device = cx.device;
         let mut rcc = device.RCC.constrain();
         let mut gpioa = device.GPIOA.split(&mut rcc.ahb2);
-        let mut cs1 = gpioa
-            .pa3
-            .into_open_drain_output(&mut gpioa.moder, &mut gpioa.otyper);
-        cs1.set_high().expect("To be able to set CS1 to high");
 
         let flash = device.FLASH.constrain();
         let pwr = device.PWR.constrain(&mut rcc.apb1r1);
@@ -279,21 +279,31 @@ const APP: () = {
         let mut gpiob = device.GPIOB.split(&mut rcc.ahb2);
         let led_nose_b = gpioa
             .pa0
-            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
+            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper)
+            .into_af1(&mut gpioa.moder, &mut gpioa.afrl);
         let led_nose_g = gpioa
             .pa1
-            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
+            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper)
+            .into_af1(&mut gpioa.moder, &mut gpioa.afrl);
         let led_nose_r = gpioa
             .pa2
-            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
+            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper)
+            .into_af1(&mut gpioa.moder, &mut gpioa.afrl);
         let led_eye = gpioa
             .pa11
             .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
         let led_mouth = gpiob
             .pb11
-            .into_push_pull_output(&mut gpiob.moder, &mut gpiob.otyper);
+            .into_push_pull_output(&mut gpiob.moder, &mut gpiob.otyper)
+            .into_af1(&mut gpiob.moder, &mut gpiob.afrh);
+        let tim2_pwm = device.TIM2.pwm(
+            (led_nose_b, led_nose_g, led_nose_r, led_mouth),
+            1.khz(),
+            clocks,
+            &mut rcc.apb1r1,
+        );
         let mut state_leds =
-            state::StateLeds::new(led_nose_b, led_nose_g, led_nose_r, led_eye, led_mouth);
+            state::StateLeds::new(tim2_pwm.0, tim2_pwm.1, tim2_pwm.2, led_eye, tim2_pwm.3);
         state_leds.set_init_state(state::InitState::Begin);
 
         let spi1 = init_spi1(
@@ -320,6 +330,12 @@ const APP: () = {
             250.khz(),
         );
 
+        gpioa_pupdr().write(|w| w.pupdr6().pull_up().pupdr8().pull_up());
+
+        let mut cs1 = gpioa
+            .pa3
+            .into_open_drain_output(&mut gpioa.moder, &mut gpioa.otyper);
+        cs1.set_high().expect("To be able to set CS1 to high");
         let cs2 = gpioa
             .pa8
             .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
@@ -360,7 +376,7 @@ const APP: () = {
         let sound_device = SoundDevice::new(
             &mut buffers.dma_buffer,
             clocks.sysclk(),
-            device.TIM2,
+            device.TIM6,
             device.DAC1,
             device.DMA1,
             audio_en,

@@ -57,7 +57,7 @@ pub struct SoundDevice<'a> {
     stop_at_buffer_len: Option<usize>,
     dma1: stm32l431::DMA1,
     dac: stm32l431::DAC1,
-    tim2: stm32l431::TIM2,
+    tim6: stm32l431::TIM6,
     sysclk_freq: time::Hertz,
     pub stopping: bool,
     pub debug_data: DebuggingData,
@@ -69,7 +69,7 @@ impl<'a> SoundDevice<'a> {
     pub fn new(
         dma_buffer: &'a mut [u16; DMA_LENGTH],
         sysclk: time::Hertz,
-        tim2: stm32l431::TIM2,
+        tim6: stm32l431::TIM6,
         dac: stm32l431::DAC1,
         dma1: stm32l431::DMA1,
         audio_en: gpioa::PA12<Output<PushPull>>,
@@ -79,7 +79,7 @@ impl<'a> SoundDevice<'a> {
         let obj = Self {
             dma_buffer,
             stop_at_buffer_len: None,
-            tim2,
+            tim6,
             dma1,
             dac,
             sysclk_freq: sysclk,
@@ -89,7 +89,7 @@ impl<'a> SoundDevice<'a> {
             audio_en,
         };
         let apb1rstr = apb1rstr();
-        obj.init_tim2(apb1enr, apb1rstr);
+        obj.init_tim6(apb1enr, apb1rstr);
         obj.init_dac1(apb1enr);
         obj.init_dma1(ahbenr);
         obj
@@ -108,9 +108,9 @@ impl<'a> SoundDevice<'a> {
         let freq = mp3_player
             .last_frame_rate
             .ok_or(PlayError::NoValidMp3Frame)?;
-        let arr = self.sysclk_freq.0 / freq.0;
-        self.tim2.arr.write(|w| w.arr().bits(arr));
-        self.tim2.cr1.modify(|_, w| w.cen().enabled());
+        let arr = (self.sysclk_freq.0 / freq.0) as u16;
+        self.tim6.arr.write(|w| w.arr().bits(arr));
+        self.tim6.cr1.modify(|_, w| w.cen().enabled());
         self.dma1.ccr3.modify(|_, w| {
             w.circ().enabled();
             w.tcie().enabled();
@@ -196,8 +196,8 @@ impl<'a> SoundDevice<'a> {
         state
     }
     pub fn toggle_pause(&mut self) {
-        self.tim2.cr1.modify(|r, w| w.cen().bit(!r.cen().bit()));
-        if self.tim2.cr1.read().cen().is_enabled() {
+        self.tim6.cr1.modify(|r, w| w.cen().bit(!r.cen().bit()));
+        if self.tim6.cr1.read().cen().is_enabled() {
             self.audio_en.set_high()
         } else {
             self.audio_en.set_low()
@@ -206,7 +206,7 @@ impl<'a> SoundDevice<'a> {
     }
 
     pub fn stop_playing(&mut self) {
-        self.tim2.cr1.modify(|_, w| w.cen().disabled());
+        self.tim6.cr1.modify(|_, w| w.cen().disabled());
         self.dma1.ccr3.modify(|_, w| w.en().disabled());
         self.play_pause_start.take();
         self.audio_en
@@ -235,11 +235,11 @@ impl<'a> SoundDevice<'a> {
         }
     }
 
-    fn init_tim2(&self, apb1enr: &stm32l431::rcc::APB1ENR1, apb1rstr: &stm32l431::rcc::APB1RSTR1) {
-        apb1rstr.modify(|_, w| w.tim2rst().set_bit());
-        apb1rstr.modify(|_, w| w.tim2rst().clear_bit());
-        apb1enr.modify(|_, w| w.tim2en().set_bit());
-        self.tim2.cr2.write(|w| w.mms().update());
+    fn init_tim6(&self, apb1enr: &stm32l431::rcc::APB1ENR1, apb1rstr: &stm32l431::rcc::APB1RSTR1) {
+        apb1rstr.modify(|_, w| w.tim6rst().set_bit());
+        apb1rstr.modify(|_, w| w.tim6rst().clear_bit());
+        apb1enr.modify(|_, w| w.tim6en().set_bit());
+        self.tim6.cr2.write(|w| w.mms().update());
     }
 
     fn init_dac1(&self, apb1enr: &stm32l431::rcc::APB1ENR1) {
@@ -247,7 +247,7 @@ impl<'a> SoundDevice<'a> {
         self.dac.cr.write(|w| {
             w.ten1().set_bit();
             unsafe {
-                w.tsel1().bits(0b100);
+                w.tsel1().bits(0b000); // TIM6_TRGO
             }
             w
         });
