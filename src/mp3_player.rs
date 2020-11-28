@@ -7,7 +7,6 @@ use stm32l4xx_hal::prelude::*;
 use stm32l4xx_hal::time;
 
 const MP3_TRIGGER_MOVE: usize = 2 * 1024;
-const VOLUME_REDUCTION: usize = 2;
 
 #[derive(Debug)]
 pub enum PlayError {
@@ -169,8 +168,7 @@ impl<'a> Mp3Player<'a> {
                         .iter()
                         .step_by(frame.channels as usize)
                         .take(frame.sample_count.min(dma_buffer.len() - index) as usize)
-                        .map(|sample| ((*sample as i32) - (core::i16::MIN as i32)) as u16 >> 4)
-                        .map(|sample| sample >> VOLUME_REDUCTION);
+                        .map(|sample| ((*sample as i32) - (core::i16::MIN as i32)) as u16 >> 4);
                     for val in samples {
                         dma_buffer[index] = val;
                         index += 1;
