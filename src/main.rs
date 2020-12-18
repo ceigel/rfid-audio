@@ -42,7 +42,7 @@ const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Debug;
 const MP3_DATA_LENGTH: usize = 18 * 1024;
 const USER_CYCLIC_TIME: time::Duration = time::Duration::from_millis(125);
 const BATTERY_READER_CYCLIC_TIME: time::Duration = time::Duration::from_secs(6);
-const CARD_SCAN_PAUSE: time::Duration = time::Duration::from_millis(1000);
+const CARD_SCAN_PAUSE: time::Duration = time::Duration::from_millis(5000);
 const BTN_CLICK_DEBASE: time::Duration = time::Duration::from_millis(500);
 
 fn gpioa_pupdr() -> &'static stm32l431::gpioa::PUPDR {
@@ -105,10 +105,10 @@ fn init_clocks(
         hal::rcc::ClockSecuritySystem::Disable,
     )
     .pll_source(hal::rcc::PllSource::HSE)
-    .sysclk(36.mhz())
-    .hclk(36.mhz())
-    .pclk2(36.mhz())
-    .pclk1(36.mhz())
+    .sysclk(72.mhz())
+    .hclk(72.mhz())
+    .pclk2(72.mhz())
+    .pclk1(72.mhz())
     .freeze(&mut flash.acr, &mut pwr)
 }
 
@@ -304,7 +304,7 @@ const APP: () = {
         );
         let mut state_leds =
             state::StateLeds::new(tim2_pwm.0, tim2_pwm.1, tim2_pwm.2, led_eye, tim2_pwm.3);
-        state_leds.set_init_state(state::InitState::Begin);
+        state_leds.set_state(state::State::Init(state::InitState::Begin));
 
         let spi1 = init_spi1(
             device.SPI1,
@@ -340,7 +340,7 @@ const APP: () = {
             .pa8
             .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
 
-        state_leds.set_init_state(state::InitState::SetSDCard);
+        state_leds.set_state(state::State::Init(state::InitState::SetSDCard));
         debug!("Initializing sd-card reader");
         let card_reader = SdCardReader::new(spi1, cs1, 8.mhz(), clocks)
             .map_err(|e| {
@@ -350,7 +350,7 @@ const APP: () = {
             .expect("To have a sd card reader");
         debug!("Initializing rfid reader");
 
-        state_leds.set_init_state(state::InitState::SetRFID);
+        state_leds.set_state(state::State::Init(state::InitState::SetRFID));
         let rfid_reader = init_rfid_reader(spi2, cs2);
 
         let audio_out = gpioa.pa4.into_analog(&mut gpioa.moder, &mut gpioa.pupdr); // Speaker out
@@ -382,7 +382,7 @@ const APP: () = {
             audio_en,
         );
 
-        state_leds.set_init_state(state::InitState::InitADC);
+        state_leds.set_state(state::State::Init(state::InitState::InitADC));
         debug!("Init ADC");
         /*let battery_reader = battery_voltage::BatteryReader::new(
             gpiob.pb0,
@@ -419,7 +419,7 @@ const APP: () = {
         let battery_reader_cyclic_time = time_computer.to_cycles(BATTERY_READER_CYCLIC_TIME);
 
         info!("Init finished");
-        state_leds.set_init_state(state::InitState::InitFinished);
+        state_leds.set_state(state::State::Init(state::InitState::InitFinished));
         init::LateResources {
             playing_resources: PlayingResources {
                 sound_device,
@@ -444,7 +444,7 @@ const APP: () = {
         loop {}
     }
 
-    #[task(resources=[playing_resources, user_cyclic_time, rfid_reader, buttons, btn_click_debase], priority=8, spawn=[start_playlist], schedule=[user_cyclic, btn_pressed])]
+    #[task(resources=[playing_resources, user_cyclic_time, rfid_reader, buttons, btn_click_debase, state_leds], priority=8, spawn=[start_playlist], schedule=[user_cyclic, btn_pressed])]
     fn user_cyclic(cx: user_cyclic::Context) {
         let mut uid_hex: [u8; 8] = [0; 8];
         if let Some(uid) = rfid_read_card(cx.resources.rfid_reader) {
@@ -465,6 +465,8 @@ const APP: () = {
             cx.schedule.btn_pressed(sched_next, ButtonKind::Pause).ok();
         }
 
+        let state_leds = cx.resources.state_leds;
+        state_leds.show_state().expect("To be able to show state");
         let user_cyclic_time = *cx.resources.user_cyclic_time;
         cx.schedule
             .user_cyclic(cx.scheduled + user_cyclic_time)
@@ -486,11 +488,13 @@ const APP: () = {
         debug!("In btn_pressed");
         match btn_kind {
             ButtonKind::Next => {
+                info!("Stop playing: ");
                 cx.resources.playing_resources.sound_device.stop_playing();
                 info!("Trigger playlist next");
                 cx.spawn.playlist_next(true).ok();
             }
             ButtonKind::Previous => {
+                info!("Stop playing: ");
                 cx.resources.playing_resources.sound_device.stop_playing();
                 info!("Trigger playlist prev");
                 cx.spawn.playlist_next(false).ok();
@@ -502,12 +506,13 @@ const APP: () = {
         }
     }
 
-    #[task(resources=[playing_resources, current_playlist, card_scan_pause], spawn=[playlist_next])]
+    #[task(resources=[playing_resources, current_playlist, card_scan_pause, state_leds], spawn=[playlist_next])]
     fn start_playlist(cx: start_playlist::Context, directory_name: PlaylistName) {
         let start_playlistResources {
             mut playing_resources,
             mut current_playlist,
             card_scan_pause,
+            mut state_leds,
         } = cx.resources;
         let mut play_successful = false;
         current_playlist.lock(|playlist| {
@@ -524,8 +529,9 @@ const APP: () = {
                 if same_playlist && at_begining {
                     info!("Same card");
                 } else {
-                    info!("Starting playlist: {}", directory_name);
+                    info!("Stop playing: ");
                     pr.sound_device.stop_playing();
+                    info!("Starting playlist: {}", directory_name);
                     playlist
                         .take()
                         .map(|playlist| playlist.close(&mut pr.card_reader));
@@ -534,12 +540,13 @@ const APP: () = {
                         .open_directory(&directory_name.as_str())
                         .map_err(|e| {
                             error!("Can not open directory: {}, err: {:?}", directory_name, e);
-                            //leds.set_state(LedsState::Red, true);
+                            state_leds.lock(|state_leds| state_leds.set_state(state::State::Error));
                             e
                         })
                         .map(|next_playlist| {
                             playlist.replace(next_playlist);
-                            //leds.set_state(LedsState::Green, true);
+                            state_leds
+                                .lock(|state_leds| state_leds.set_state(state::State::Playing));
                         });
                     play_successful = play_result.is_ok()
                 }
@@ -550,7 +557,7 @@ const APP: () = {
         }
     }
 
-    #[task(resources=[playing_resources, current_playlist])]
+    #[task(resources=[playing_resources, current_playlist, state_leds])]
     fn playlist_next(mut cx: playlist_next::Context, forward: bool) {
         info!("Playlist_next called forward: {}", forward);
         let direction = if forward {
@@ -560,8 +567,10 @@ const APP: () = {
         };
         let playing_resources = &mut cx.resources.playing_resources;
         let current_playlist = &mut cx.resources.current_playlist;
+        let state_leds = &mut cx.resources.state_leds;
         current_playlist.lock(|playlist| {
             playing_resources.lock(|pr| {
+                info!("Stop playing: ");
                 pr.sound_device.stop_playing();
                 match playlist {
                     None => info!("Playlist none"),
@@ -579,20 +588,20 @@ const APP: () = {
                                     Ok(None)
                                 }
                             });
-                        match play_result {
+                        state_leds.lock(|state_leds| match play_result {
                             Ok(Some(file_name)) => {
-                                //leds.set_state(LedsState::Green, true);
+                                state_leds.set_state(state::State::Playing);
                                 info!("Playing {}", file_name);
                             }
                             Ok(None) => {
-                                //leds.set_state(LedsState::Yellow, true);
+                                state_leds.set_state(state::State::NotPlaying);
                                 info!("Playing nothing");
                             }
                             Err(e) => {
-                                //leds.set_state(LedsState::Red, true);
+                                state_leds.set_state(state::State::Error);
                                 error!("Playlist {} can't be played: {:?}", playlist.name(), e);
                             }
-                        }
+                        });
                     }
                 }
             })
