@@ -5,7 +5,7 @@ use embedded_hal::PwmPin;
 use hal::gpio::{gpioa, Output, PushPull};
 use hal::pwm::{Pwm, C1, C2, C3, C4};
 use hal::stm32::TIM2;
-use log::{error, info};
+use log::error;
 
 #[derive(Debug, PartialEq)]
 #[allow(unused)]
@@ -32,15 +32,23 @@ pub enum Error {
 
 struct PwmLed<P: PwmPin<Duty = u32>> {
     led: P,
+    current_duty: u32,
+    min_duty: u32,
+    max_duty: u32,
     light_level_increases: bool,
     revert: bool,
 }
 
 impl<P: PwmPin<Duty = u32>> PwmLed<P> {
     pub(crate) fn new(pwm: P, revert: bool) -> Self {
+        let min_duty = 0;
+        let max_duty = pwm.get_max_duty();
         Self {
             led: pwm,
-            light_level_increases: revert,
+            current_duty: min_duty,
+            min_duty,
+            max_duty,
+            light_level_increases: !revert,
             revert,
         }
     }
@@ -51,21 +59,22 @@ impl<P: PwmPin<Duty = u32>> PwmLed<P> {
 
     pub(crate) fn set_duty(&mut self, duty: f32) {
         let duty = if self.revert { 1.0 - duty } else { duty };
-        let next_duty = (duty * (self.led.get_max_duty() as f32)) as u32;
-        self.led.set_duty(next_duty);
+        self.current_duty = (duty * (self.max_duty as f32)) as u32;
+        self.led.set_duty(self.current_duty);
     }
 
     pub(crate) fn update_modulated(&mut self) {
-        const MODULATION_STEP_SIZE: u32 = 300;
-        let max_duty = self.led.get_max_duty();
-        let current_duty = self.led.get_duty();
+        const MODULATION_STEP_SIZE: u32 = 6000;
+        let max_duty = self.max_duty;
+        let min_duty = self.min_duty;
+        let current_duty = self.current_duty;
         let increment = MODULATION_STEP_SIZE;
-        let new_duty = if self.light_level_increases && max_duty - current_duty <= increment {
+        self.current_duty = if self.light_level_increases && max_duty - current_duty < increment {
             self.light_level_increases = false;
             max_duty
-        } else if !self.light_level_increases && current_duty < increment {
+        } else if !self.light_level_increases && current_duty - min_duty < increment {
             self.light_level_increases = true;
-            0
+            self.min_duty
         } else {
             if self.light_level_increases {
                 current_duty + increment
@@ -73,7 +82,7 @@ impl<P: PwmPin<Duty = u32>> PwmLed<P> {
                 current_duty - increment
             }
         };
-        self.led.set_duty(new_duty);
+        self.led.set_duty(self.current_duty);
     }
 }
 pub struct StateLeds {
@@ -87,7 +96,7 @@ pub struct StateLeds {
 }
 
 impl StateLeds {
-    const DISPLAY_CYCLE: u32 = 10;
+    const DISPLAY_CYCLE: u32 = 1;
     pub fn new(
         nose_b: Pwm<TIM2, C1>,
         nose_g: Pwm<TIM2, C2>,
@@ -111,24 +120,38 @@ impl StateLeds {
     pub fn set_state(&mut self, state: State) {
         self.state = state;
         self.display_count = 0;
-        if let Err(Error::GpioError) = self.show_state() {
+        if let Err(Error::GpioError) = self.update_state() {
             error!("Can't set leds");
         }
     }
 
-    pub fn show_state(&mut self) -> Result<(), self::Error> {
+    pub fn show_state(&mut self) {
+        self.display_count += 1;
+        if self.display_count == Self::DISPLAY_CYCLE {
+            self.display_count = 0
+        }
         if self.display_count == 0 {
-            self.display()
-        } else {
-            self.display_count += 1;
-            if self.display_count == Self::DISPLAY_CYCLE {
-                self.display_count = 0
+            if let Err(Error::GpioError) = self.display() {
+                error!("Can't set leds");
             }
-            Ok(())
         }
     }
 
-    pub(crate) fn display(&mut self) -> Result<(), self::Error> {
+    fn display(&mut self) -> Result<(), self::Error> {
+        match &self.state {
+            State::Error => {
+                self.nose_r.update_modulated();
+            }
+            State::Playing => self.nose_g.update_modulated(),
+            State::NotPlaying => self.nose_b.update_modulated(),
+            State::PlaylistNotFound => self.nose_r.update_modulated(),
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn update_state(&mut self) -> Result<(), self::Error> {
         self.reset();
         match &self.state {
             State::Init(init_state) => match init_state {
@@ -142,25 +165,21 @@ impl StateLeds {
                 }
             },
             State::Error => {
-                self.nose_r.update_modulated();
                 self.mouth.set_duty(0.0);
                 self.eye.set_low().ok();
             }
             State::Playing => {
                 self.mouth.set_duty(1.0);
-                self.nose_g.update_modulated()
             }
             State::NotPlaying => {
                 self.mouth.set_duty(1.0);
-                self.nose_b.update_modulated()
             }
             State::PlaylistNotFound => {
                 self.mouth.set_duty(1.0);
-                self.nose_r.update_modulated()
             }
         }
 
-        Ok(())
+        self.display()
     }
 
     fn init_leds(&mut self) {

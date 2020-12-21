@@ -7,10 +7,11 @@ set print asm-demangle on
 set backtrace limit 32
 
 # detect unhandled exceptions, hard faults and panics
-break DefaultHandler
-break HardFault
+# break DefaultHandler
+# break HardFault
 break rust_begin_unwind
 
+b state.rs.rs:78
 # *try* to stop at the user entry point (it might be gone due to inlining)
 
 # # send captured ITM to the file itm.fifo

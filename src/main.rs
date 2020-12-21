@@ -466,7 +466,7 @@ const APP: () = {
         }
 
         let state_leds = cx.resources.state_leds;
-        state_leds.show_state().expect("To be able to show state");
+        state_leds.show_state();
         let user_cyclic_time = *cx.resources.user_cyclic_time;
         cx.schedule
             .user_cyclic(cx.scheduled + user_cyclic_time)
