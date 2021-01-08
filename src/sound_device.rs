@@ -129,7 +129,13 @@ impl<'a> SoundDevice<'a> {
     }
 
     pub fn play_pause_elapsed(&self) -> Option<Duration> {
-        self.play_pause_start.map(|t| t.elapsed())
+        self.play_pause_start.and_then(|t| {
+            if Instant::now() < t {
+                None
+            } else {
+                Some(t.elapsed())
+            }
+        })
     }
 
     pub fn fill_pcm_buffer(

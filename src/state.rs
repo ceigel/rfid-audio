@@ -32,22 +32,25 @@ pub enum Error {
 
 struct PwmLed<P: PwmPin<Duty = u32>> {
     led: P,
-    current_duty: u32,
-    min_duty: u32,
-    max_duty: u32,
+    duty_idx: usize,
     light_level_increases: bool,
     revert: bool,
 }
 
 impl<P: PwmPin<Duty = u32>> PwmLed<P> {
+    const VALUES_TABLE: [u32; 100] = [
+        0, 2, 11, 25, 44, 69, 100, 137, 179, 228, 282, 343, 409, 483, 562, 648, 741, 841, 949,
+        1063, 1185, 1315, 1453, 1599, 1754, 1917, 2089, 2271, 2462, 2663, 2874, 3096, 3328, 3571,
+        3826, 4092, 4371, 4661, 4964, 5280, 5610, 5953, 6309, 6680, 7064, 7463, 7877, 8306, 8749,
+        9208, 9681, 10170, 10674, 11193, 11727, 12275, 12838, 13415, 14006, 14610, 15227, 15857,
+        16498, 17149, 17811, 18482, 19161, 19847, 20539, 21235, 21935, 22636, 23338, 24038, 24736,
+        25429, 26115, 26794, 27462, 28118, 28761, 29388, 29997, 30587, 31155, 31700, 32220, 32712,
+        33176, 33609, 34011, 34379, 34712, 35009, 35269, 35490, 35672, 35815, 35917, 35979,
+    ];
     pub(crate) fn new(pwm: P, revert: bool) -> Self {
-        let min_duty = 0;
-        let max_duty = pwm.get_max_duty();
         Self {
             led: pwm,
-            current_duty: min_duty,
-            min_duty,
-            max_duty,
+            duty_idx: 0,
             light_level_increases: !revert,
             revert,
         }
@@ -59,30 +62,23 @@ impl<P: PwmPin<Duty = u32>> PwmLed<P> {
 
     pub(crate) fn set_duty(&mut self, duty: f32) {
         let duty = if self.revert { 1.0 - duty } else { duty };
-        self.current_duty = (duty * (self.max_duty as f32)) as u32;
-        self.led.set_duty(self.current_duty);
+        let current_duty = (duty * (self.led.get_max_duty() as f32)) as u32;
+        self.led.set_duty(current_duty);
     }
 
     pub(crate) fn update_modulated(&mut self) {
-        const MODULATION_STEP_SIZE: u32 = 6000;
-        let max_duty = self.max_duty;
-        let min_duty = self.min_duty;
-        let current_duty = self.current_duty;
-        let increment = MODULATION_STEP_SIZE;
-        self.current_duty = if self.light_level_increases && max_duty - current_duty < increment {
+        let current_idx = self.duty_idx;
+        if self.light_level_increases && current_idx == Self::VALUES_TABLE.len() - 1 {
             self.light_level_increases = false;
-            max_duty
-        } else if !self.light_level_increases && current_duty - min_duty < increment {
+        } else if !self.light_level_increases && current_idx == 0 {
             self.light_level_increases = true;
-            self.min_duty
+        }
+        self.duty_idx = if self.light_level_increases {
+            current_idx + 1
         } else {
-            if self.light_level_increases {
-                current_duty + increment
-            } else {
-                current_duty - increment
-            }
+            current_idx - 1
         };
-        self.led.set_duty(self.current_duty);
+        self.led.set_duty(Self::VALUES_TABLE[self.duty_idx]);
     }
 }
 pub struct StateLeds {

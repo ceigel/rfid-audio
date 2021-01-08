@@ -41,6 +41,7 @@ static mut LOGGER: Option<Logger<InterruptSync>> = None;
 const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Debug;
 const MP3_DATA_LENGTH: usize = 18 * 1024;
 const USER_CYCLIC_TIME: time::Duration = time::Duration::from_millis(125);
+const LEDS_CYCLIC_TIME: time::Duration = time::Duration::from_millis(40);
 const BATTERY_READER_CYCLIC_TIME: time::Duration = time::Duration::from_secs(6);
 const CARD_SCAN_PAUSE: time::Duration = time::Duration::from_millis(5000);
 const BTN_CLICK_DEBASE: time::Duration = time::Duration::from_millis(500);
@@ -249,10 +250,11 @@ const APP: () = {
         card_scan_pause: rtic::cyccnt::Duration,
         //battery_reader: battery_voltage::BatteryReader,
         user_cyclic_time: rtic::cyccnt::Duration,
+        leds_cyclic_time: rtic::cyccnt::Duration,
         battery_reader_cyclic_time: rtic::cyccnt::Duration,
     }
 
-    #[init(spawn=[start_playlist, user_cyclic, battery_status])]
+    #[init(spawn=[start_playlist, user_cyclic, leds_cyclic, battery_status])]
     fn init(cx: init::Context) -> init::LateResources {
         let mut core = cx.core;
         core.DCB.enable_trace();
@@ -407,7 +409,8 @@ const APP: () = {
             //.start_playlist(PlaylistName::from_bytes("02".as_bytes())) // mozart stuff
             //.start_playlist(PlaylistName::from_bytes("87B13133".as_bytes())) // mama maria
             .expect("To start playlist");
-        cx.spawn.user_cyclic().expect("To start cyclic task");
+        cx.spawn.user_cyclic().expect("To start user cyclic task");
+        cx.spawn.leds_cyclic().expect("To start leds cyclic task");
         cx.spawn
             .battery_status()
             .expect("To start battery status task");
@@ -416,6 +419,7 @@ const APP: () = {
         let btn_click_debase = time_computer.to_cycles(BTN_CLICK_DEBASE);
         let card_scan_pause = time_computer.to_cycles(CARD_SCAN_PAUSE);
         let user_cyclic_time = time_computer.to_cycles(USER_CYCLIC_TIME);
+        let leds_cyclic_time = time_computer.to_cycles(LEDS_CYCLIC_TIME);
         let battery_reader_cyclic_time = time_computer.to_cycles(BATTERY_READER_CYCLIC_TIME);
 
         info!("Init finished");
@@ -434,6 +438,7 @@ const APP: () = {
             card_scan_pause,
             //battery_reader,
             user_cyclic_time,
+            leds_cyclic_time,
             battery_reader_cyclic_time,
         }
     }
@@ -444,7 +449,7 @@ const APP: () = {
         loop {}
     }
 
-    #[task(resources=[playing_resources, user_cyclic_time, rfid_reader, buttons, btn_click_debase, state_leds], priority=8, spawn=[start_playlist], schedule=[user_cyclic, btn_pressed])]
+    #[task(resources=[playing_resources, user_cyclic_time, rfid_reader, buttons, btn_click_debase], priority=8, spawn=[start_playlist], schedule=[user_cyclic, btn_pressed])]
     fn user_cyclic(cx: user_cyclic::Context) {
         let mut uid_hex: [u8; 8] = [0; 8];
         if let Some(uid) = rfid_read_card(cx.resources.rfid_reader) {
@@ -465,11 +470,18 @@ const APP: () = {
             cx.schedule.btn_pressed(sched_next, ButtonKind::Pause).ok();
         }
 
-        let state_leds = cx.resources.state_leds;
-        state_leds.show_state();
         let user_cyclic_time = *cx.resources.user_cyclic_time;
         cx.schedule
             .user_cyclic(cx.scheduled + user_cyclic_time)
+            .expect("To be able to schedule user_cyclic");
+    }
+
+    #[task(resources=[leds_cyclic_time, state_leds], schedule=[leds_cyclic])]
+    fn leds_cyclic(cx: leds_cyclic::Context) {
+        let leds_cyclic_time = *cx.resources.leds_cyclic_time;
+        cx.resources.state_leds.show_state();
+        cx.schedule
+            .leds_cyclic(cx.scheduled + leds_cyclic_time)
             .expect("To be able to schedule user_cyclic");
     }
 
@@ -512,7 +524,7 @@ const APP: () = {
             mut playing_resources,
             mut current_playlist,
             card_scan_pause,
-            mut state_leds,
+            state_leds,
         } = cx.resources;
         let mut play_successful = false;
         current_playlist.lock(|playlist| {
@@ -540,13 +552,12 @@ const APP: () = {
                         .open_directory(&directory_name.as_str())
                         .map_err(|e| {
                             error!("Can not open directory: {}, err: {:?}", directory_name, e);
-                            state_leds.lock(|state_leds| state_leds.set_state(state::State::Error));
+                            state_leds.set_state(state::State::Error);
                             e
                         })
                         .map(|next_playlist| {
                             playlist.replace(next_playlist);
-                            state_leds
-                                .lock(|state_leds| state_leds.set_state(state::State::Playing));
+                            state_leds.set_state(state::State::Playing);
                         });
                     play_successful = play_result.is_ok()
                 }
@@ -588,7 +599,7 @@ const APP: () = {
                                     Ok(None)
                                 }
                             });
-                        state_leds.lock(|state_leds| match play_result {
+                        match play_result {
                             Ok(Some(file_name)) => {
                                 state_leds.set_state(state::State::Playing);
                                 info!("Playing {}", file_name);
@@ -601,7 +612,7 @@ const APP: () = {
                                 state_leds.set_state(state::State::Error);
                                 error!("Playlist {} can't be played: {:?}", playlist.name(), e);
                             }
-                        });
+                        };
                     }
                 }
             })
