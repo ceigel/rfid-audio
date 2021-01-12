@@ -236,6 +236,20 @@ fn rfid_read_card(rfid_reader: &mut RFIDReaderType) -> Option<mfrc522::Uid> {
     atqa.and_then(|atqa| rfid_reader.select(&atqa)).ok()
 }
 
+fn print_cache_states() {
+    let icache_state = if cortex_m::peripheral::SCB::icache_enabled() {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let dcache_state = if cortex_m::peripheral::SCB::dcache_enabled() {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    debug!("ICache {}", icache_state);
+    debug!("ICache {}", dcache_state);
+}
 #[app(device = stm32l4xx_hal::stm32, monotonic = rtic::cyccnt::CYCCNT, peripherals = true)]
 const APP: () = {
     struct Resources {
@@ -422,6 +436,7 @@ const APP: () = {
         let leds_cyclic_time = time_computer.to_cycles(LEDS_CYCLIC_TIME);
         let battery_reader_cyclic_time = time_computer.to_cycles(BATTERY_READER_CYCLIC_TIME);
 
+        print_cache_states();
         info!("Init finished");
         state_leds.set_state(state::State::Init(state::InitState::InitFinished));
         init::LateResources {
