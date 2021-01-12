@@ -92,7 +92,6 @@ pub struct StateLeds {
 }
 
 impl StateLeds {
-    const DISPLAY_CYCLE: u32 = 1;
     pub fn new(
         nose_b: Pwm<TIM2, C1>,
         nose_g: Pwm<TIM2, C2>,
@@ -122,14 +121,17 @@ impl StateLeds {
     }
 
     pub fn show_state(&mut self) {
-        self.display_count += 1;
-        if self.display_count == Self::DISPLAY_CYCLE {
-            self.display_count = 0
+        self.display_count = self.display_count.wrapping_add(1);
+        self.change_state_if_needed();
+        if let Err(Error::GpioError) = self.display() {
+            error!("Can't set leds");
         }
-        if self.display_count == 0 {
-            if let Err(Error::GpioError) = self.display() {
-                error!("Can't set leds");
-            }
+    }
+
+    fn change_state_if_needed(&mut self) {
+        match &self.state {
+            State::PlaylistNotFound => self.set_state(State::NotPlaying),
+            _ => {}
         }
     }
 
