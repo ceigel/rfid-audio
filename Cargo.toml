@@ -9,9 +9,8 @@ version = "0.1.0"
 cortex-m = "0.6.1"
 cortex-m-semihosting = "0.3.3"
 cortex-m-rtic = "0.5.3"
-embedded-mp3 = { version = "0.1.0", path = "../embedded-mp3" }
+embedded-mp3 = { version = "0.1.0", git = "https://github.com/ceigel/embedded-mp3-rust.git" }
 panic-itm = "0.4.1"
-embedded-sdmmc = {version="0.3.0", path = "../embedded-sdmmc-rs"}
 log = {"version"="0.4.8", features=["max_level_trace", "release_max_level_warn"]}
 cortex-m-log = {"version"="0.6.1", features=["itm", "log-integration"]}
 mfrc522 = "0.2.0"
@@ -19,7 +18,12 @@ mfrc522 = "0.2.0"
 [dependencies.stm32l4xx-hal]
 features = ["stm32l4x1", "rt"]
 version = "0.6.0"
-path = "../stm32l4xx-hal/"
+git = "https://github.com/stm32-rs/stm32l4xx-hal.git"
+
+[dependencies.embedded-sdmmc]
+version = "0.3.0"
+git = "https://github.com/rust-embedded-community/embedded-sdmmc-rs.git"
+branch = "develop"
 
 [dependencies.cast]
 default-features = false

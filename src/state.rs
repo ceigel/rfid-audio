@@ -22,6 +22,7 @@ pub enum State {
     Playing,
     NotPlaying,
     PlaylistNotFound,
+    ShutDown,
     Error,
 }
 
@@ -162,6 +163,13 @@ impl StateLeds {
                     self.nose_g.set_duty(1.0);
                 }
             },
+            State::ShutDown => {
+                self.eye.set_low().ok();
+                self.nose_r.set_duty(0.0);
+                self.nose_g.set_duty(0.0);
+                self.nose_b.set_duty(0.0);
+                self.mouth.set_duty(0.0);
+            }
             State::Error => {
                 self.mouth.set_duty(0.0);
                 self.eye.set_low().ok();

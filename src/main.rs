@@ -248,7 +248,7 @@ fn print_cache_states() {
         "disabled"
     };
     debug!("ICache {}", icache_state);
-    debug!("ICache {}", dcache_state);
+    debug!("DCache {}", dcache_state);
 }
 #[app(device = stm32l4xx_hal::stm32, monotonic = rtic::cyccnt::CYCCNT, peripherals = true)]
 const APP: () = {
