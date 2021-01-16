@@ -45,5 +45,5 @@ opt-level = 3
 opt-level = 0
 
 [profile.dev.package."*"]
-opt-level=3
+opt-level="z"
 debug = true # symbols are nice and they don't increase the size on Flash

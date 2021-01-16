@@ -9,12 +9,14 @@ mod data_reader;
 mod hex;
 mod mp3_player;
 mod playlist;
+mod sleep_manager;
 mod sound_device;
 mod state;
 
 use data_reader::SdCardReader;
 use mp3_player::{Mp3Player, PlayError};
 use playlist::{Playlist, PlaylistMoveDirection, PlaylistName};
+use sleep_manager::SleepManager;
 use sound_device::{DmaState, SoundDevice, DMA_LENGTH};
 
 use core::time;
@@ -41,6 +43,7 @@ static mut LOGGER: Option<Logger<InterruptSync>> = None;
 const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Debug;
 const MP3_DATA_LENGTH: usize = 18 * 1024;
 const USER_CYCLIC_TIME: time::Duration = time::Duration::from_millis(125);
+const SLEEP_TIME: time::Duration = time::Duration::from_secs(5 * 60);
 const LEDS_CYCLIC_TIME: time::Duration = time::Duration::from_millis(40);
 const BATTERY_READER_CYCLIC_TIME: time::Duration = time::Duration::from_secs(6);
 const CARD_SCAN_PAUSE: time::Duration = time::Duration::from_millis(5000);
@@ -197,6 +200,7 @@ pub struct PlayingResources {
     pub sound_device: SoundDevice<'static>,
     pub mp3_player: Mp3Player<'static>,
     pub card_reader: SdCardReader<hal::gpio::gpioa::PA3<Output<OpenDrain>>>,
+    pub state_leds: state::StateLeds,
 }
 
 pub enum ButtonKind {
@@ -259,7 +263,7 @@ const APP: () = {
         current_playlist: Option<Playlist>,
         buttons: Buttons,
         rfid_reader: RFIDReaderType,
-        state_leds: state::StateLeds,
+        sleep_manager: SleepManager,
         btn_click_debase: rtic::cyccnt::Duration,
         card_scan_pause: rtic::cyccnt::Duration,
         //battery_reader: battery_voltage::BatteryReader,
@@ -273,6 +277,7 @@ const APP: () = {
         let mut core = cx.core;
         core.DCB.enable_trace();
         core.DWT.enable_cycle_counter();
+        core.SCB.set_sleepdeep();
 
         let device = cx.device;
         let mut rcc = device.RCC.constrain();
@@ -435,6 +440,7 @@ const APP: () = {
         let user_cyclic_time = time_computer.to_cycles(USER_CYCLIC_TIME);
         let leds_cyclic_time = time_computer.to_cycles(LEDS_CYCLIC_TIME);
         let battery_reader_cyclic_time = time_computer.to_cycles(BATTERY_READER_CYCLIC_TIME);
+        let sleep_manager = SleepManager::new(SLEEP_TIME, USER_CYCLIC_TIME);
 
         print_cache_states();
         info!("Init finished");
@@ -444,11 +450,12 @@ const APP: () = {
                 sound_device,
                 mp3_player,
                 card_reader,
+                state_leds,
             },
             audio_out,
             buttons,
             rfid_reader,
-            state_leds,
+            sleep_manager,
             btn_click_debase,
             card_scan_pause,
             //battery_reader,
@@ -464,7 +471,7 @@ const APP: () = {
         loop {}
     }
 
-    #[task(resources=[playing_resources, user_cyclic_time, rfid_reader, buttons, btn_click_debase], priority=8, spawn=[start_playlist], schedule=[user_cyclic, btn_pressed])]
+    #[task(resources=[playing_resources, user_cyclic_time, rfid_reader, buttons, btn_click_debase, sleep_manager], priority=8, spawn=[start_playlist], schedule=[user_cyclic, btn_pressed])]
     fn user_cyclic(cx: user_cyclic::Context) {
         let mut uid_hex: [u8; 8] = [0; 8];
         if let Some(uid) = rfid_read_card(cx.resources.rfid_reader) {
@@ -486,15 +493,22 @@ const APP: () = {
         }
 
         let user_cyclic_time = *cx.resources.user_cyclic_time;
+        let sound_device = &cx.resources.playing_resources.sound_device;
+        cx.resources.sleep_manager.click(
+            sound_device.is_playing(),
+            &mut cx.resources.playing_resources.state_leds,
+        );
         cx.schedule
             .user_cyclic(cx.scheduled + user_cyclic_time)
             .expect("To be able to schedule user_cyclic");
     }
 
-    #[task(resources=[leds_cyclic_time, state_leds], schedule=[leds_cyclic])]
-    fn leds_cyclic(cx: leds_cyclic::Context) {
+    #[task(resources=[leds_cyclic_time, playing_resources], schedule=[leds_cyclic])]
+    fn leds_cyclic(mut cx: leds_cyclic::Context) {
         let leds_cyclic_time = *cx.resources.leds_cyclic_time;
-        cx.resources.state_leds.show_state();
+        cx.resources
+            .playing_resources
+            .lock(|pr| pr.state_leds.show_state());
         cx.schedule
             .leds_cyclic(cx.scheduled + leds_cyclic_time)
             .expect("To be able to schedule user_cyclic");
@@ -533,13 +547,12 @@ const APP: () = {
         }
     }
 
-    #[task(resources=[playing_resources, current_playlist, card_scan_pause, state_leds], spawn=[playlist_next])]
+    #[task(resources=[playing_resources, current_playlist, card_scan_pause], spawn=[playlist_next])]
     fn start_playlist(cx: start_playlist::Context, directory_name: PlaylistName) {
         let start_playlistResources {
             mut playing_resources,
             mut current_playlist,
             card_scan_pause,
-            state_leds,
         } = cx.resources;
         let mut play_successful = false;
         current_playlist.lock(|playlist| {
@@ -567,12 +580,12 @@ const APP: () = {
                         .open_directory(&directory_name.as_str())
                         .map_err(|e| {
                             error!("Can not open directory: {}, err: {:?}", directory_name, e);
-                            state_leds.set_state(state::State::Error);
+                            pr.state_leds.set_state(state::State::Error);
                             e
                         })
                         .map(|next_playlist| {
                             playlist.replace(next_playlist);
-                            state_leds.set_state(state::State::Playing);
+                            pr.state_leds.set_state(state::State::Playing);
                         });
                     play_successful = play_result.is_ok()
                 }
@@ -583,7 +596,7 @@ const APP: () = {
         }
     }
 
-    #[task(resources=[playing_resources, current_playlist, state_leds])]
+    #[task(resources=[playing_resources, current_playlist])]
     fn playlist_next(mut cx: playlist_next::Context, forward: bool) {
         info!("Playlist_next called forward: {}", forward);
         let direction = if forward {
@@ -593,7 +606,6 @@ const APP: () = {
         };
         let playing_resources = &mut cx.resources.playing_resources;
         let current_playlist = &mut cx.resources.current_playlist;
-        let state_leds = &mut cx.resources.state_leds;
         current_playlist.lock(|playlist| {
             playing_resources.lock(|pr| {
                 info!("Stop playing: ");
@@ -616,15 +628,15 @@ const APP: () = {
                             });
                         match play_result {
                             Ok(Some(file_name)) => {
-                                state_leds.set_state(state::State::Playing);
+                                pr.state_leds.set_state(state::State::Playing);
                                 info!("Playing {}", file_name);
                             }
                             Ok(None) => {
-                                state_leds.set_state(state::State::NotPlaying);
+                                pr.state_leds.set_state(state::State::NotPlaying);
                                 info!("Playing nothing");
                             }
                             Err(e) => {
-                                state_leds.set_state(state::State::Error);
+                                pr.state_leds.set_state(state::State::Error);
                                 error!("Playlist {} can't be played: {:?}", playlist.name(), e);
                             }
                         };

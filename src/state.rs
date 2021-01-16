@@ -60,6 +60,9 @@ impl<P: PwmPin<Duty = u32>> PwmLed<P> {
     pub(crate) fn enable(&mut self) {
         self.led.enable();
     }
+    pub(crate) fn disable(&mut self) {
+        self.led.disable();
+    }
 
     pub(crate) fn set_duty(&mut self, duty: f32) {
         let duty = if self.revert { 1.0 - duty } else { duty };
@@ -165,10 +168,10 @@ impl StateLeds {
             },
             State::ShutDown => {
                 self.eye.set_low().ok();
-                self.nose_r.set_duty(0.0);
-                self.nose_g.set_duty(0.0);
-                self.nose_b.set_duty(0.0);
-                self.mouth.set_duty(0.0);
+                self.nose_r.disable();
+                self.nose_g.disable();
+                self.nose_b.disable();
+                self.mouth.disable();
             }
             State::Error => {
                 self.mouth.set_duty(0.0);

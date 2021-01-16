@@ -52,6 +52,35 @@ impl DebuggingData {
     }
 }
 
+pub struct InnerState {
+    audio_en: gpioa::PA12<Output<PushPull>>,
+    stopped: bool,
+}
+
+impl InnerState {
+    pub fn new(mut audio_en: gpioa::PA12<Output<PushPull>>) -> Self {
+        audio_en.set_low().expect("To be able to re-set audio_en");
+
+        Self {
+            audio_en,
+            stopped: true,
+        }
+    }
+    pub fn set_playing(&mut self) {
+        self.stopped = false;
+        self.audio_en
+            .set_high()
+            .expect("To be able to set audio_en");
+    }
+    pub fn set_stopped(&mut self) {
+        self.stopped = true;
+        self.audio_en.set_low().expect("To be able to set audio_en");
+    }
+    pub fn is_playing(&self) -> bool {
+        !self.stopped
+    }
+}
+
 pub struct SoundDevice<'a> {
     dma_buffer: &'a mut [u16; DMA_LENGTH],
     stop_at_buffer_len: Option<usize>,
@@ -62,7 +91,7 @@ pub struct SoundDevice<'a> {
     pub stopping: bool,
     pub debug_data: DebuggingData,
     play_pause_start: Option<Instant>,
-    audio_en: gpioa::PA12<Output<PushPull>>,
+    inner_state: InnerState,
 }
 
 impl<'a> SoundDevice<'a> {
@@ -76,6 +105,7 @@ impl<'a> SoundDevice<'a> {
     ) -> Self {
         let apb1enr = apb1enr();
         let ahbenr = ahbenr();
+        let inner_state = InnerState::new(audio_en);
         let obj = Self {
             dma_buffer,
             stop_at_buffer_len: None,
@@ -86,7 +116,7 @@ impl<'a> SoundDevice<'a> {
             stopping: false,
             debug_data: DebuggingData::new(),
             play_pause_start: None,
-            audio_en,
+            inner_state,
         };
         let apb1rstr = apb1rstr();
         obj.init_tim6(apb1enr, apb1rstr);
@@ -122,12 +152,13 @@ impl<'a> SoundDevice<'a> {
         self.stopping = false;
         self.stop_at_buffer_len = None;
         self.play_pause_start.replace(Instant::now());
-        self.audio_en
-            .set_high()
-            .expect("To be able to set audio_en");
+        self.inner_state.set_playing();
         Ok(())
     }
 
+    pub fn is_playing(&self) -> bool {
+        self.inner_state.is_playing()
+    }
     pub fn play_pause_elapsed(&self) -> Option<Duration> {
         self.play_pause_start.and_then(|t| {
             if Instant::now() < t {
@@ -204,20 +235,17 @@ impl<'a> SoundDevice<'a> {
     pub fn toggle_pause(&mut self) {
         self.tim6.cr1.modify(|r, w| w.cen().bit(!r.cen().bit()));
         if self.tim6.cr1.read().cen().is_enabled() {
-            self.audio_en.set_high()
+            self.inner_state.set_playing();
         } else {
-            self.audio_en.set_low()
+            self.inner_state.set_stopped();
         }
-        .expect("To be able to re-set audio_en");
     }
 
     pub fn stop_playing(&mut self) {
         self.tim6.cr1.modify(|_, w| w.cen().disabled());
         self.dma1.ccr3.modify(|_, w| w.en().disabled());
         self.play_pause_start.take();
-        self.audio_en
-            .set_low()
-            .expect("To be able to re-set audio_en");
+        self.inner_state.set_stopped();
     }
 
     pub fn set_dma_stop(&mut self, state: DmaState) -> DmaState {
