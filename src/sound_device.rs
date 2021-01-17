@@ -278,6 +278,12 @@ impl<'a> SoundDevice<'a> {
 
     fn init_dac1(&self, apb1enr: &stm32l431::rcc::APB1ENR1) {
         apb1enr.modify(|_, w| w.dac1en().set_bit());
+        self.dac.mcr.write(|w| {
+            unsafe {
+                w.mode1().bits(0b100); // output enabled, no buffer
+            }
+            w
+        });
         self.dac.cr.write(|w| {
             w.ten1().set_bit();
             unsafe {
