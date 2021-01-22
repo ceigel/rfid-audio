@@ -15,6 +15,11 @@ impl SleepManager {
         }
     }
 
+    pub fn shut_down(state_leds: &mut StateLeds) {
+        state_leds.set_state(State::ShutDown);
+        cortex_m::asm::wfi();
+    }
+
     pub fn click(&mut self, reset_sleep: bool, state_leds: &mut StateLeds) {
         if reset_sleep {
             self.current_click_count = 0;
@@ -22,8 +27,7 @@ impl SleepManager {
             self.current_click_count += 1;
         }
         if self.current_click_count >= self.sleep_click_count {
-            state_leds.set_state(State::ShutDown);
-            cortex_m::asm::wfi();
+            Self::shut_down(state_leds);
         }
     }
 }

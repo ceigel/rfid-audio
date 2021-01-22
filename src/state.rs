@@ -23,6 +23,7 @@ pub enum State {
     NotPlaying,
     PlaylistNotFound,
     ShutDown,
+    ShuttingDown,
     Error,
 }
 
@@ -126,13 +127,13 @@ impl StateLeds {
 
     pub fn show_state(&mut self) {
         self.display_count = self.display_count.wrapping_add(1);
-        self.change_state_if_needed();
+        self.auto_transition();
         if let Err(Error::GpioError) = self.display() {
             error!("Can't set leds");
         }
     }
 
-    fn change_state_if_needed(&mut self) {
+    fn auto_transition(&mut self) {
         match &self.state {
             State::PlaylistNotFound => self.set_state(State::NotPlaying),
             _ => {}
@@ -147,6 +148,7 @@ impl StateLeds {
             State::Playing => self.nose_g.update_modulated(),
             State::NotPlaying => self.nose_b.update_modulated(),
             State::PlaylistNotFound => self.nose_r.update_modulated(),
+            State::ShuttingDown => self.mouth.update_modulated(),
             _ => {}
         }
 
@@ -172,6 +174,13 @@ impl StateLeds {
                 self.nose_g.disable();
                 self.nose_b.disable();
                 self.mouth.disable();
+            }
+            State::ShuttingDown => {
+                self.eye.set_low().ok();
+                self.nose_r.set_duty(0.0);
+                self.nose_g.set_duty(0.0);
+                self.nose_b.set_duty(0.0);
+                self.mouth.set_duty(0.0);
             }
             State::Error => {
                 self.mouth.set_duty(0.0);

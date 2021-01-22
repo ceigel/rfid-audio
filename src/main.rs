@@ -4,7 +4,12 @@
 extern crate embedded_mp3 as mp3;
 use panic_itm as _;
 
+#[macro_use(block)]
+extern crate nb;
+
 mod battery_voltage;
+mod buttons;
+mod cycles_computer;
 mod data_reader;
 mod hex;
 mod mp3_player;
@@ -13,6 +18,7 @@ mod sleep_manager;
 mod sound_device;
 mod state;
 
+use buttons::{ButtonKind, Buttons};
 use data_reader::SdCardReader;
 use mp3_player::{Mp3Player, PlayError};
 use playlist::{Playlist, PlaylistMoveDirection, PlaylistName};
@@ -23,9 +29,11 @@ use core::time;
 use cortex_m_log::destination;
 use cortex_m_log::log::Logger;
 use cortex_m_log::printer::itm::InterruptSync;
+use cycles_computer::CyclesComputer;
 use embedded_hal::digital::v1_compat;
+use hal::adc::ADC;
 use hal::gpio::{
-    gpioa, gpiob, Alternate, Analog, Floating, Input, OpenDrain, Output, PullUp, PushPull, AF5,
+    gpioa, gpiob, Alternate, Analog, Floating, Input, OpenDrain, Output, PushPull, AF5,
 };
 use hal::hal as embedded_hal;
 use hal::spi::Spi;
@@ -33,10 +41,11 @@ use hal::time::Hertz;
 use stm32l4xx_hal as hal;
 use stm32l4xx_hal::prelude::*;
 
+use embedded_hal::blocking::delay::DelayUs;
+use embedded_hal::timer::CountDown;
 use log::{debug, error, info};
 use mfrc522::{self, Mfrc522};
 use rtic::app;
-use rtic::cyccnt::U32Ext;
 use stm32l4xx_hal::stm32 as stm32l431;
 
 static mut LOGGER: Option<Logger<InterruptSync>> = None;
@@ -45,9 +54,11 @@ const MP3_DATA_LENGTH: usize = 18 * 1024;
 const USER_CYCLIC_TIME: time::Duration = time::Duration::from_millis(125);
 const SLEEP_TIME: time::Duration = time::Duration::from_secs(5 * 60);
 const LEDS_CYCLIC_TIME: time::Duration = time::Duration::from_millis(40);
-const BATTERY_READER_CYCLIC_TIME: time::Duration = time::Duration::from_secs(6);
+const BATTERY_READER_CYCLIC_TIME: time::Duration = time::Duration::from_secs(10);
+const SHUTTING_DOWN_TIME: time::Duration = time::Duration::from_secs(5);
 const CARD_SCAN_PAUSE: time::Duration = time::Duration::from_millis(5000);
 const BTN_CLICK_DEBASE: time::Duration = time::Duration::from_millis(500);
+const BATTERY_SHUTDOWN_LEVEL: u16 = 3350;
 
 fn gpioa_pupdr() -> &'static stm32l431::gpioa::PUPDR {
     unsafe { &(*stm32l431::GPIOA::ptr()).pupdr }
@@ -81,22 +92,6 @@ impl Buffers {
 }
 static mut BUFFERS: Buffers = Buffers::new();
 static mut CCRAM_BUFFERS: CCRamBuffers = CCRamBuffers::new();
-
-pub struct CyclesComputer {
-    frequency: Hertz,
-}
-
-impl CyclesComputer {
-    pub fn new(frequency: Hertz) -> Self {
-        CyclesComputer { frequency }
-    }
-
-    pub fn to_cycles(&self, duration: time::Duration) -> rtic::cyccnt::Duration {
-        let s_part = (duration.as_secs() as u32) * self.frequency.0;
-        let mms_part = (duration.subsec_micros() / 1000) * (self.frequency.0 / 1000);
-        (s_part + mms_part).cycles()
-    }
-}
 
 fn init_clocks(
     cfgr: hal::rcc::CFGR,
@@ -203,38 +198,6 @@ pub struct PlayingResources {
     pub state_leds: state::StateLeds,
 }
 
-pub enum ButtonKind {
-    Previous,
-    Pause,
-    Next,
-}
-
-pub struct Buttons {
-    pub button_next: gpiob::PB2<Input<PullUp>>,
-    pub button_prev: gpiob::PB12<Input<PullUp>>,
-    pub button_pause: gpiob::PB10<Input<PullUp>>,
-}
-
-impl Buttons {
-    pub fn new(
-        prev: gpiob::PB12<Input<Floating>>,
-        pause: gpiob::PB10<Input<Floating>>,
-        next: gpiob::PB2<Input<Floating>>,
-        moder: &mut gpiob::MODER,
-        pupdr: &mut gpiob::PUPDR,
-    ) -> Self {
-        let button_next = next.into_pull_up_input(moder, pupdr);
-        let button_prev = prev.into_pull_up_input(moder, pupdr);
-        let button_pause = pause.into_pull_up_input(moder, pupdr);
-
-        Buttons {
-            button_next,
-            button_prev,
-            button_pause,
-        }
-    }
-}
-
 fn rfid_read_card(rfid_reader: &mut RFIDReaderType) -> Option<mfrc522::Uid> {
     let atqa = rfid_reader.reqa();
     atqa.and_then(|atqa| rfid_reader.select(&atqa)).ok()
@@ -254,6 +217,26 @@ fn print_cache_states() {
     debug!("ICache {}", icache_state);
     debug!("DCache {}", dcache_state);
 }
+
+pub struct DelayTimer<T: CountDown<Time = hal::time::Hertz>> {
+    timer: T,
+}
+
+impl<T: CountDown<Time = hal::time::Hertz>> DelayTimer<T> {
+    pub fn new(timer: T) -> Self {
+        Self { timer }
+    }
+}
+
+impl<T: CountDown<Time = hal::time::Hertz>> DelayUs<u32> for DelayTimer<T> {
+    fn delay_us(&mut self, us: u32) {
+        use hal::time::{MegaHertz, U32Ext};
+        let mhz: MegaHertz = us.mhz();
+        self.timer.start(mhz);
+        block!(self.timer.wait()).expect("To be able to wait for timer");
+    }
+}
+
 #[app(device = stm32l4xx_hal::stm32, monotonic = rtic::cyccnt::CYCCNT, peripherals = true)]
 const APP: () = {
     struct Resources {
@@ -266,10 +249,10 @@ const APP: () = {
         sleep_manager: SleepManager,
         btn_click_debase: rtic::cyccnt::Duration,
         card_scan_pause: rtic::cyccnt::Duration,
-        //battery_reader: battery_voltage::BatteryReader,
+        battery_reader: battery_voltage::BatteryReader,
         user_cyclic_time: rtic::cyccnt::Duration,
         leds_cyclic_time: rtic::cyccnt::Duration,
-        battery_reader_cyclic_time: rtic::cyccnt::Duration,
+        time_computer: CyclesComputer,
     }
 
     #[init(spawn=[start_playlist, user_cyclic, leds_cyclic, battery_status])]
@@ -403,15 +386,12 @@ const APP: () = {
             audio_en,
         );
 
-        state_leds.set_state(state::State::Init(state::InitState::InitADC));
         debug!("Init ADC");
-        /*let battery_reader = battery_voltage::BatteryReader::new(
-            gpiob.pb0,
-            device.ADC,
-            &mut gpiob.moder,
-            &mut gpiob.pupdr,
-            &clocks,
-        );*/
+        let tim7 = hal::timer::Timer::tim7(device.TIM7, 1.mhz(), clocks, &mut rcc.apb1r1);
+        let mut delay = DelayTimer::new(tim7);
+        let adc = ADC::new(device.ADC, &mut rcc.ahb2, &mut rcc.ccipr, &mut delay);
+        let adc_in = gpiob.pb0.into_analog(&mut gpiob.moder, &mut gpiob.pupdr);
+        let battery_reader = battery_voltage::BatteryReader::new(adc, adc_in);
 
         debug!("Initializing buttons");
         let buttons = Buttons::new(
@@ -439,7 +419,6 @@ const APP: () = {
         let card_scan_pause = time_computer.to_cycles(CARD_SCAN_PAUSE);
         let user_cyclic_time = time_computer.to_cycles(USER_CYCLIC_TIME);
         let leds_cyclic_time = time_computer.to_cycles(LEDS_CYCLIC_TIME);
-        let battery_reader_cyclic_time = time_computer.to_cycles(BATTERY_READER_CYCLIC_TIME);
         let sleep_manager = SleepManager::new(SLEEP_TIME, USER_CYCLIC_TIME);
 
         print_cache_states();
@@ -458,10 +437,10 @@ const APP: () = {
             sleep_manager,
             btn_click_debase,
             card_scan_pause,
-            //battery_reader,
+            battery_reader,
             user_cyclic_time,
             leds_cyclic_time,
-            battery_reader_cyclic_time,
+            time_computer,
         }
     }
 
@@ -514,13 +493,37 @@ const APP: () = {
             .expect("To be able to schedule user_cyclic");
     }
 
-    #[task(resources=[battery_reader_cyclic_time], schedule=[battery_status])]
-    fn battery_status(cx: battery_status::Context) {
-        info!("Read battery level");
-        //let val = cx.resources.battery_reader.read();
-        //info!("Battery value: {}", val);
+    #[task(resources=[playing_resources], priority=8)]
+    fn shut_down(cx: shut_down::Context) {
+        let pr = cx.resources.playing_resources;
+        SleepManager::shut_down(&mut pr.state_leds);
+    }
+
+    #[task(resources=[time_computer, battery_reader, playing_resources], schedule=[battery_status, shut_down])]
+    fn battery_status(mut cx: battery_status::Context) {
+        let start = rtic::cyccnt::Instant::now();
+        let val = cx.resources.battery_reader.read();
+        let tc = cx.resources.time_computer;
+        let elapsed = tc.from_cycles(start.elapsed());
+        let mut shut_down = false;
+        info!("Battery value: {}, elapsed: {}us", val, elapsed.as_micros());
+        cx.resources.playing_resources.lock(|pr| {
+            if val < BATTERY_SHUTDOWN_LEVEL {
+                pr.sound_device.stop_playing();
+                pr.state_leds.set_state(state::State::ShuttingDown);
+                shut_down = true;
+            }
+        });
+        if shut_down {
+            let shutting_down_time = tc.to_cycles(SHUTTING_DOWN_TIME);
+            cx.schedule
+                .shut_down(cx.scheduled + shutting_down_time)
+                .expect("To be able to schedule shut_down");
+            error!("Will sleep!");
+        }
+        let battery_reader_cyclic_time = tc.to_cycles(BATTERY_READER_CYCLIC_TIME);
         cx.schedule
-            .battery_status(cx.scheduled + *cx.resources.battery_reader_cyclic_time)
+            .battery_status(cx.scheduled + battery_reader_cyclic_time)
             .expect("To be able to schedule battery_status");
     }
 

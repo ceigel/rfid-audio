@@ -152,8 +152,9 @@ where
                     }
                     let sz_read = self
                         .controller
-                        .read(&self.volume, &mut log_file, &mut buf)?;
-                    self.controller.close_file(&self.volume, log_file)?;
+                        .read(&self.volume, &mut log_file, &mut buf)
+                        .unwrap_or_default();
+                    self.controller.close_file(&self.volume, log_file).ok();
                     sz_read
                 }
                 Err(FileError::FileNotFound) => 0,
@@ -168,24 +169,17 @@ where
             .rsplit(|c| *c == '\r' as u8 || *c == '\n' as u8)
             .filter(|s| s.len() != 0)
             .take(MAX_UNKNOWN)
-            .filter(|n| *n == directory_name_bytes);
-        let mut write_idx = write_buf.len();
+            .filter(|n| *n != directory_name_bytes)
+            .chain(core::iter::once(directory_name_bytes));
+        write_buf[0..BOM.len()].copy_from_slice(&BOM);
+        let mut write_idx = BOM.len();
         while let Some(card) = cards.next() {
-            write_idx -= LOG_LINE_LEN;
-            write_buf[write_idx..write_idx + LOG_LINE_LEN].copy_from_slice(card);
+            write_buf[write_idx..(write_idx + PLAYLIST_NAME_LEN)].copy_from_slice(card);
+            write_idx += PLAYLIST_NAME_LEN;
+            write_buf[write_idx..(write_idx + END_LINE.len())].copy_from_slice(END_LINE.as_bytes());
+            write_idx += END_LINE.len();
         }
-        write_idx -= BOM.len();
-        write_buf[write_idx..write_idx + BOM.len()].copy_from_slice(&BOM);
-        /*
-        let all_cards = core::iter::once(directory_name_bytes).chain(cards);
-        let end_bytes = END_LINE.as_bytes();
-        cards.fold((write_buf, BOM.len()), |(mut buf, idx), card_bytes| {
-            let end = idx + card_bytes.len();
-            buf[idx..end].copy_from_slice(card_bytes);
-            buf[end..(end + end_bytes.len())].copy_from_slice(end_bytes);
-            (buf, idx + end + end_bytes.len())
-        });
-        */
+
         let mut log_file = self.controller.open_file_in_dir(
             &mut self.volume,
             &self.root_dir,
@@ -193,7 +187,8 @@ where
             sdmmc::Mode::ReadWriteCreateOrTruncate,
         )?;
         self.controller
-            .write(&mut self.volume, &mut log_file, &write_buf[write_idx..])?;
+            .write(&mut self.volume, &mut log_file, &write_buf[..write_idx])?;
+        self.controller.close_file(&self.volume, log_file)?;
         Ok(())
     }
 }
