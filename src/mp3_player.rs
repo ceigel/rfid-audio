@@ -26,7 +26,7 @@ pub struct Mp3Player<'a> {
     read_index: usize,
     write_index: usize,
     mp3_data: &'a mut [u8; MP3_DATA_LENGTH],
-    decoder: mp3::Decoder<'a>,
+    decoder: mp3::Decoder,
     pub(crate) last_frame_rate: Option<time::Hertz>,
     pcm_buffer: &'a mut [i16; mp3::MAX_SAMPLES_PER_FRAME],
 }
@@ -34,14 +34,13 @@ pub struct Mp3Player<'a> {
 impl<'a> Mp3Player<'a> {
     pub fn new(
         mp3_data: &'a mut [u8; MP3_DATA_LENGTH],
-        decoder_data: &'a mut mp3::DecoderData,
         pcm_buffer: &'a mut [i16; mp3::MAX_SAMPLES_PER_FRAME],
     ) -> Self {
         Self {
             read_index: 0,
             write_index: 0,
             mp3_data,
-            decoder: mp3::Decoder::new(decoder_data),
+            decoder: mp3::Decoder::new(),
             pcm_buffer: pcm_buffer,
             last_frame_rate: None,
         }

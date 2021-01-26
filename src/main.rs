@@ -63,22 +63,11 @@ const BATTERY_SHUTDOWN_LEVEL: u16 = 3350;
 fn gpioa_pupdr() -> &'static stm32l431::gpioa::PUPDR {
     unsafe { &(*stm32l431::GPIOA::ptr()).pupdr }
 }
-struct CCRamBuffers {
-    pub mp3_decoder_data: mp3::DecoderData,
-}
 
 struct Buffers {
     pub dma_buffer: [u16; DMA_LENGTH],
     pub mp3_data: [u8; MP3_DATA_LENGTH],
     pub pcm_buffer: [i16; mp3::MAX_SAMPLES_PER_FRAME],
-}
-
-impl CCRamBuffers {
-    pub const fn new() -> Self {
-        Self {
-            mp3_decoder_data: mp3::DecoderData::new(),
-        }
-    }
 }
 
 impl Buffers {
@@ -91,7 +80,6 @@ impl Buffers {
     }
 }
 static mut BUFFERS: Buffers = Buffers::new();
-static mut CCRAM_BUFFERS: CCRamBuffers = CCRamBuffers::new();
 
 fn init_clocks(
     cfgr: hal::rcc::CFGR,
@@ -364,17 +352,8 @@ const APP: () = {
         audio_en.set_low().expect("To set audio_en low");
 
         let buffers = unsafe { &mut BUFFERS };
-        let ccram_buffers = unsafe { &mut CCRAM_BUFFERS };
-        let mp3_player = Mp3Player::new(
-            &mut buffers.mp3_data,
-            &mut ccram_buffers.mp3_decoder_data,
-            &mut buffers.pcm_buffer,
-        );
-        debug!(
-            "Size of buffers: ccram_buffers: {}, buffers: {}",
-            core::mem::size_of::<CCRamBuffers>(),
-            core::mem::size_of::<Buffers>()
-        );
+        let mp3_player = Mp3Player::new(&mut buffers.mp3_data, &mut buffers.pcm_buffer);
+        debug!("Size of buffers: {}", core::mem::size_of::<Buffers>());
 
         debug!("Initializing sound device");
         let sound_device = SoundDevice::new(
