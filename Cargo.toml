@@ -48,9 +48,8 @@ lto = true # better optimizations
 opt-level = 3
 
 [profile.dev]
-lto = true # better optimizations
 opt-level='z'
 
 [profile.dev.package."*"]
-opt-level="z"
+opt-level=3
 debug = true # symbols are nice and they don't increase the size on Flash

@@ -43,7 +43,7 @@ use stm32l4xx_hal::prelude::*;
 
 use embedded_hal::blocking::delay::DelayUs;
 use embedded_hal::timer::CountDown;
-use log::{debug, error, info};
+use log::{error, info};
 use mfrc522::{self, Mfrc522};
 use rtic::app;
 use stm32l4xx_hal::stm32 as stm32l431;
@@ -191,21 +191,6 @@ fn rfid_read_card(rfid_reader: &mut RFIDReaderType) -> Option<mfrc522::Uid> {
     atqa.and_then(|atqa| rfid_reader.select(&atqa)).ok()
 }
 
-fn print_cache_states() {
-    let icache_state = if cortex_m::peripheral::SCB::icache_enabled() {
-        "enabled"
-    } else {
-        "disabled"
-    };
-    let dcache_state = if cortex_m::peripheral::SCB::dcache_enabled() {
-        "enabled"
-    } else {
-        "disabled"
-    };
-    debug!("ICache {}", icache_state);
-    debug!("DCache {}", dcache_state);
-}
-
 pub struct DelayTimer<T: CountDown<Time = hal::time::Hertz>> {
     timer: T,
 }
@@ -266,7 +251,6 @@ const APP: () = {
             LOGGER.as_ref().expect("to have a logger")
         };
         cortex_m_log::log::init(logger).expect("To set logger");
-        debug!("Configuring");
 
         let mut gpiob = device.GPIOB.split(&mut rcc.ahb2);
         let led_nose_b = gpioa
@@ -333,14 +317,12 @@ const APP: () = {
             .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
 
         state_leds.set_state(state::State::Init(state::InitState::SetSDCard));
-        debug!("Initializing sd-card reader");
         let card_reader = SdCardReader::new(spi1, cs1, 8.mhz(), clocks)
             .map_err(|e| {
                 error!("Card reader init failed: {:?}", e);
                 e
             })
             .expect("To have a sd card reader");
-        debug!("Initializing rfid reader");
 
         state_leds.set_state(state::State::Init(state::InitState::SetRFID));
         let rfid_reader = init_rfid_reader(spi2, cs2);
@@ -353,9 +335,7 @@ const APP: () = {
 
         let buffers = unsafe { &mut BUFFERS };
         let mp3_player = Mp3Player::new(&mut buffers.mp3_data, &mut buffers.pcm_buffer);
-        debug!("Size of buffers: {}", core::mem::size_of::<Buffers>());
 
-        debug!("Initializing sound device");
         let sound_device = SoundDevice::new(
             &mut buffers.dma_buffer,
             clocks.sysclk(),
@@ -365,14 +345,12 @@ const APP: () = {
             audio_en,
         );
 
-        debug!("Init ADC");
         let tim7 = hal::timer::Timer::tim7(device.TIM7, 1.mhz(), clocks, &mut rcc.apb1r1);
         let mut delay = DelayTimer::new(tim7);
         let adc = ADC::new(device.ADC, &mut rcc.ahb2, &mut rcc.ccipr, &mut delay);
         let adc_in = gpiob.pb0.into_analog(&mut gpiob.moder, &mut gpiob.pupdr);
         let battery_reader = battery_voltage::BatteryReader::new(adc, adc_in);
 
-        debug!("Initializing buttons");
         let buttons = Buttons::new(
             gpiob.pb12,
             gpiob.pb10,
@@ -381,7 +359,6 @@ const APP: () = {
             &mut gpiob.pupdr,
         );
 
-        debug!("Start cyclic task");
         cx.spawn
             .start_playlist(PlaylistName::from_bytes("49DFFE97".as_bytes())) // winamp intro
             //.start_playlist(PlaylistName::from_bytes("02".as_bytes())) // mozart stuff
@@ -400,7 +377,6 @@ const APP: () = {
         let leds_cyclic_time = time_computer.to_cycles(LEDS_CYCLIC_TIME);
         let sleep_manager = SleepManager::new(SLEEP_TIME, USER_CYCLIC_TIME);
 
-        print_cache_states();
         info!("Init finished");
         state_leds.set_state(state::State::Init(state::InitState::InitFinished));
         init::LateResources {
@@ -508,7 +484,6 @@ const APP: () = {
 
     #[task(resources=[playing_resources], priority=8, spawn=[playlist_next])]
     fn btn_pressed(cx: btn_pressed::Context, btn_kind: ButtonKind) {
-        debug!("In btn_pressed");
         match btn_kind {
             ButtonKind::Next => {
                 info!("Stop playing: ");
