@@ -280,7 +280,7 @@ impl<'a> SoundDevice<'a> {
         apb1enr.modify(|_, w| w.dac1en().set_bit());
         self.dac.mcr.write(|w| {
             unsafe {
-                w.mode1().bits(0b100); // output enabled, no buffer
+                w.mode1().bits(0b000); // normal mode, buffer enabled
             }
             w
         });
