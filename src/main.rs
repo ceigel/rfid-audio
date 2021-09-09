@@ -13,6 +13,7 @@ mod cycles_computer;
 mod data_reader;
 mod hex;
 mod mp3_player;
+mod pause_point;
 mod playlist;
 mod sleep_manager;
 mod sound_device;
