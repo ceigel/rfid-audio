@@ -115,50 +115,38 @@ pub(crate) type Spi2Type = Spi<hal::stm32::SPI2, Spi2Pins>;
 
 fn init_spi1(
     spi1: hal::stm32::SPI1,
-    sck: gpioa::PA5<Input<Floating>>,
-    miso: gpioa::PA6<Input<Floating>>,
-    mosi: gpioa::PA7<Input<Floating>>,
-    moder: &mut gpioa::MODER,
-    afrl: &mut gpioa::AFRL,
+    sck: gpioa::PA5<Alternate<AF5, Input<Floating>>>,
+    miso: gpioa::PA6<Alternate<AF5, Input<Floating>>>,
+    mosi: gpioa::PA7<Alternate<AF5, Input<Floating>>>,
     apb2: &mut hal::rcc::APB2,
     clocks: &hal::rcc::Clocks,
     freq: impl Into<Hertz>,
 ) -> Spi1Type {
-    let sck = sck.into_af5(moder, afrl);
-    let miso = miso.into_af5(moder, afrl);
-    let mosi = mosi.into_af5(moder, afrl);
     let spi_mode = embedded_hal::spi::Mode {
         polarity: embedded_hal::spi::Polarity::IdleLow,
         phase: embedded_hal::spi::Phase::CaptureOnFirstTransition,
     };
 
-    let spi = Spi::spi1(spi1, (sck, miso, mosi), spi_mode, freq, *clocks, apb2);
-    spi
+    Spi::spi1(spi1, (sck, miso, mosi), spi_mode, freq, *clocks, apb2)
 }
 
 type RFIDReaderType = Mfrc522<Spi2Type, v1_compat::OldOutputPin<gpioa::PA8<Output<PushPull>>>>;
 
 fn init_spi2(
     spi2: hal::stm32::SPI2,
-    sck: gpiob::PB13<Input<Floating>>,
-    miso: gpiob::PB14<Input<Floating>>,
-    mosi: gpiob::PB15<Input<Floating>>,
-    moder: &mut gpiob::MODER,
-    afrh: &mut gpiob::AFRH,
+    sck: gpiob::PB13<Alternate<AF5, Input<Floating>>>,
+    miso: gpiob::PB14<Alternate<AF5, Input<Floating>>>,
+    mosi: gpiob::PB15<Alternate<AF5, Input<Floating>>>,
     apb1: &mut hal::rcc::APB1R1,
     clocks: &hal::rcc::Clocks,
     freq: impl Into<Hertz>,
 ) -> Spi2Type {
-    let sck = sck.into_af5(moder, afrh);
-    let miso = miso.into_af5(moder, afrh);
-    let mosi = mosi.into_af5(moder, afrh);
     let spi_mode = embedded_hal::spi::Mode {
         polarity: embedded_hal::spi::Polarity::IdleLow,
         phase: embedded_hal::spi::Phase::CaptureOnFirstTransition,
     };
 
-    let spi = Spi::spi2(spi2, (sck, miso, mosi), spi_mode, freq, *clocks, apb1);
-    spi
+    Spi::spi2(spi2, (sck, miso, mosi), spi_mode, freq, *clocks, apb1)
 }
 
 fn init_rfid_reader(spi2: Spi2Type, cs2: gpioa::PA8<Output<PushPull>>) -> RFIDReaderType {
@@ -223,6 +211,7 @@ const APP: () = {
         btn_click_debase: rtic::cyccnt::Duration,
         card_scan_pause: rtic::cyccnt::Duration,
         battery_reader: battery_voltage::BatteryReader,
+        charging_line: gpioa::PA15<Input<Floating>>,
         user_cyclic_time: rtic::cyccnt::Duration,
         leds_cyclic_time: rtic::cyccnt::Duration,
         time_computer: CyclesComputer,
@@ -284,11 +273,9 @@ const APP: () = {
 
         let spi1 = init_spi1(
             device.SPI1,
-            gpioa.pa5,
-            gpioa.pa6,
-            gpioa.pa7,
-            &mut gpioa.moder,
-            &mut gpioa.afrl,
+            gpioa.pa5.into_af5(&mut gpioa.moder, &mut gpioa.afrl),
+            gpioa.pa6.into_af5(&mut gpioa.moder, &mut gpioa.afrl),
+            gpioa.pa7.into_af5(&mut gpioa.moder, &mut gpioa.afrl),
             &mut rcc.apb2,
             &clocks,
             250.khz(),
@@ -296,11 +283,9 @@ const APP: () = {
 
         let spi2 = init_spi2(
             device.SPI2,
-            gpiob.pb13,
-            gpiob.pb14,
-            gpiob.pb15,
-            &mut gpiob.moder,
-            &mut gpiob.afrh,
+            gpiob.pb13.into_af5(&mut gpiob.moder, &mut gpiob.afrh),
+            gpiob.pb14.into_af5(&mut gpiob.moder, &mut gpiob.afrh),
+            gpiob.pb15.into_af5(&mut gpiob.moder, &mut gpiob.afrh),
             &mut rcc.apb1r1,
             &clocks,
             250.khz(),
@@ -347,9 +332,18 @@ const APP: () = {
 
         let tim7 = hal::timer::Timer::tim7(device.TIM7, 1.mhz(), clocks, &mut rcc.apb1r1);
         let mut delay = DelayTimer::new(tim7);
-        let adc = ADC::new(device.ADC, &mut rcc.ahb2, &mut rcc.ccipr, &mut delay);
+        let adc = ADC::new(
+            device.ADC1,
+            device.ADC_COMMON,
+            &mut rcc.ahb2,
+            &mut rcc.ccipr,
+            &mut delay,
+        );
         let adc_in = gpiob.pb0.into_analog(&mut gpiob.moder, &mut gpiob.pupdr);
         let battery_reader = battery_voltage::BatteryReader::new(adc, adc_in);
+        let charging_line = gpioa
+            .pa15
+            .into_floating_input(&mut gpioa.moder, &mut gpioa.pupdr);
 
         let buttons = Buttons::new(
             gpiob.pb12,
@@ -393,12 +387,14 @@ const APP: () = {
             btn_click_debase,
             card_scan_pause,
             battery_reader,
+            charging_line,
             user_cyclic_time,
             leds_cyclic_time,
             time_computer,
         }
     }
 
+    #[allow(clippy::empty_loop)]
     #[idle()]
     fn idle(_cx: idle::Context) -> ! {
         info!("idle");
@@ -454,16 +450,17 @@ const APP: () = {
         SleepManager::shut_down(&mut pr.state_leds);
     }
 
-    #[task(resources=[time_computer, battery_reader, playing_resources], schedule=[battery_status, shut_down])]
+    #[task(resources=[time_computer, battery_reader, charging_line, playing_resources], schedule=[battery_status, shut_down])]
     fn battery_status(mut cx: battery_status::Context) {
         let start = rtic::cyccnt::Instant::now();
         let val = cx.resources.battery_reader.read();
         let tc = cx.resources.time_computer;
         let elapsed = tc.from_cycles(start.elapsed());
+        let charging = cx.resources.charging_line.is_low().unwrap_or(false);
         let mut shut_down = false;
         info!("Battery value: {}, elapsed: {}us", val, elapsed.as_micros());
         cx.resources.playing_resources.lock(|pr| {
-            if val < BATTERY_SHUTDOWN_LEVEL {
+            if val < BATTERY_SHUTDOWN_LEVEL && !charging {
                 pr.sound_device.stop_playing();
                 pr.state_leds.set_state(state::State::ShuttingDown);
                 shut_down = true;
@@ -475,11 +472,12 @@ const APP: () = {
                 .shut_down(cx.scheduled + shutting_down_time)
                 .expect("To be able to schedule shut_down");
             error!("Will sleep!");
+        } else {
+            let battery_reader_cyclic_time = tc.to_cycles(BATTERY_READER_CYCLIC_TIME);
+            cx.schedule
+                .battery_status(cx.scheduled + battery_reader_cyclic_time)
+                .expect("To be able to schedule battery_status");
         }
-        let battery_reader_cyclic_time = tc.to_cycles(BATTERY_READER_CYCLIC_TIME);
-        cx.schedule
-            .battery_status(cx.scheduled + battery_reader_cyclic_time)
-            .expect("To be able to schedule battery_status");
     }
 
     #[task(resources=[playing_resources], priority=8, spawn=[playlist_next])]
@@ -529,12 +527,12 @@ const APP: () = {
                     info!("Stop playing: ");
                     pr.sound_device.stop_playing();
                     info!("Starting playlist: {}", directory_name);
-                    playlist
-                        .take()
-                        .map(|playlist| playlist.close(&mut pr.card_reader));
+                    if let Some(playlist) = playlist.take() {
+                        playlist.close(&mut pr.card_reader);
+                    }
                     let play_result = pr
                         .card_reader
-                        .open_directory(&directory_name.as_str())
+                        .open_directory(directory_name.as_str())
                         .map_err(|e| {
                             error!("Can not open directory: {}, err: {:?}", directory_name, e);
                             pr.state_leds.set_state(state::State::Error);
@@ -572,7 +570,7 @@ const APP: () = {
                     Some(playlist) => {
                         let play_result = playlist
                             .move_next(direction, &mut pr.card_reader)
-                            .map_err(|e| PlayError::from(e))
+                            .map_err(PlayError::from)
                             .and_then(|song| {
                                 if let Some(song) = song {
                                     let file_name = song.file_name();
@@ -620,16 +618,12 @@ const APP: () = {
                 } else {
                     1
                 };
-                match pr.sound_device.fill_pcm_buffer(
-                    index,
-                    &mut pr.mp3_player,
-                    current_song,
-                    &mut pr.card_reader,
-                ) {
-                    Err(_) => {
-                        cx.spawn.playlist_next(true).ok();
-                    }
-                    _ => {}
+                if pr
+                    .sound_device
+                    .fill_pcm_buffer(index, &mut pr.mp3_player, current_song, &mut pr.card_reader)
+                    .is_err()
+                {
+                    cx.spawn.playlist_next(true).ok();
                 }
             }
             DmaState::Stopped => {

@@ -12,6 +12,7 @@ const MP3_TRIGGER_MOVE: usize = 2 * 1024;
 pub enum PlayError {
     FileError(FileError),
     NotAnMp3,
+    FileToShort,
     NoValidMp3Frame,
     PlaylistFinished,
 }
@@ -41,7 +42,7 @@ impl<'a> Mp3Player<'a> {
             write_index: 0,
             mp3_data,
             decoder: mp3::Decoder::new(),
-            pcm_buffer: pcm_buffer,
+            pcm_buffer,
             last_frame_rate: None,
         }
     }
@@ -89,10 +90,10 @@ impl<'a> Mp3Player<'a> {
         if buf[5] & 0x10 != 0 {
             id3v2size += 10;
         }
-        debug!("ID3V2 size is {}", id3v2size);
+        info!("ID3V2 size is {}", id3v2size);
         data_reader
             .seek_from_start(id3v2size)
-            .map_err(|_| PlayError::NotAnMp3)
+            .map_err(|_| PlayError::FileToShort)
     }
 
     pub fn fill_buffer(
@@ -142,7 +143,7 @@ impl<'a> Mp3Player<'a> {
             let bytes_red = data_reader.read_data(directory_navigator, out_slice);
             if bytes_red.is_err() {
                 error!("Error reading data: {:?}", bytes_red);
-                return bytes_red.map(|_| ()).map_err(|e| PlayError::from(e));
+                return bytes_red.map(|_| ()).map_err(PlayError::from);
             }
             let bytes_red = bytes_red.unwrap();
             self.write_index += bytes_red;
@@ -154,7 +155,7 @@ impl<'a> Mp3Player<'a> {
         let mut index: usize = 0;
         loop {
             let mp3: &[u8] = &self.mp3_data[self.read_index..self.write_index];
-            if mp3.len() == 0 {
+            if mp3.is_empty() {
                 return index;
             }
             let pcm_buffer = &mut self.pcm_buffer;

@@ -14,7 +14,7 @@ impl CyclesComputer {
     pub fn to_cycles(&self, duration: time::Duration) -> cyccnt::Duration {
         use rtic::cyccnt::U32Ext;
         let s_part = (duration.as_secs() as u32) * self.frequency.0;
-        let mms_part = (duration.subsec_micros() / 1000) * (self.frequency.0 / 1000);
+        let mms_part = (duration.subsec_millis()) * (self.frequency.0 / 1000);
         (s_part + mms_part).cycles()
     }
 

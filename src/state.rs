@@ -134,9 +134,8 @@ impl StateLeds {
     }
 
     fn auto_transition(&mut self) {
-        match &self.state {
-            State::PlaylistNotFound => self.set_state(State::NotPlaying),
-            _ => {}
+        if let State::PlaylistNotFound = &self.state {
+            self.set_state(State::NotPlaying);
         }
     }
 
@@ -145,10 +144,22 @@ impl StateLeds {
             State::Error => {
                 self.nose_r.update_modulated();
             }
-            State::Playing => self.nose_g.update_modulated(),
-            State::NotPlaying => self.nose_b.update_modulated(),
-            State::PlaylistNotFound => self.nose_r.update_modulated(),
-            State::ShuttingDown => self.mouth.update_modulated(),
+            State::Playing => {
+                self.nose_g.update_modulated();
+                self.eye.set_high().expect("Infallible");
+            }
+            State::NotPlaying => {
+                self.nose_b.update_modulated();
+                self.eye.set_high().expect("Infallible");
+            }
+            State::PlaylistNotFound => {
+                self.nose_r.update_modulated();
+                self.eye.set_high().expect("Infallible");
+            }
+            State::ShuttingDown => {
+                self.mouth.update_modulated();
+                self.eye.set_high().expect("Infallible");
+            }
             _ => {}
         }
 

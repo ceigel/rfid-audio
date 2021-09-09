@@ -9,7 +9,7 @@ pub enum PlaylistMoveDirection {
 }
 
 #[derive(Clone, Debug)]
-pub struct PlaylistName {
+pub(crate) struct PlaylistName {
     pub name: [u8; PLAYLIST_NAME_LEN],
     pub name_len: usize,
 }
@@ -45,6 +45,12 @@ impl PartialEq<sdmmc::ShortFileName> for PlaylistName {
     }
 }
 
+impl PartialEq<PlaylistName> for PlaylistName {
+    fn eq(&self, other: &PlaylistName) -> bool {
+        self.name == other.name
+    }
+}
+
 pub struct Playlist {
     directory: sdmmc::Directory,
     directory_name: sdmmc::ShortFileName,
@@ -60,7 +66,7 @@ impl Playlist {
         }
     }
 
-    pub fn move_next<'a>(
+    pub fn move_next(
         &mut self,
         dir: PlaylistMoveDirection,
         directory_navigator: &mut impl DirectoryNavigator,
@@ -97,7 +103,7 @@ impl Playlist {
     }
 
     pub fn name(&self) -> sdmmc::ShortFileName {
-        return self.directory_name.clone();
+        self.directory_name.clone()
     }
 
     pub fn close(self, directory_navigator: &mut impl DirectoryNavigator) {

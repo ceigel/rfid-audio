@@ -35,7 +35,7 @@ pub enum DmaState {
     Unknown,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct DebuggingData {
     pub trigger_complete_count: u32,
     pub half_trigger_count: u32,

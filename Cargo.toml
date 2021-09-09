@@ -1,5 +1,5 @@
 [package]
-authors = ["Raphael Nestler <raphael.nestler@gmail.com>"]
+authors = ["Cristian Eigel <cristian.eigel@icloud.com>"]
 edition = "2018"
 readme = "README.md"
 name = "rfid-audio"
@@ -7,34 +7,34 @@ version = "0.1.0"
 resolver="2"
 
 [dependencies]
-cortex-m = "0.6.1"
-cortex-m-semihosting = "0.3.3"
-cortex-m-rtic = "0.5.3"
-panic-itm = "0.4.1"
-log = {"version"="0.4.8", features=["max_level_info", "release_max_level_info"]}
-cortex-m-log = {"version"="0.6.1", features=["itm", "log-integration"]}
+cortex-m = "0.7.3"
+cortex-m-semihosting = "0.3.7"
+cortex-m-rtic = "0.5.7"
+panic-itm = "0.4.2"
+log = { "version" = "0.4.14", features = ["max_level_info", "release_max_level_info"] }
+cortex-m-log = { "version" = "0.7.0", features = ["itm", "log-integration"] }
 mfrc522 = "0.2.0"
-nb = "0.1.1"
+nb = "1.0.0"
 
 [dependencies.embedded-mp3]
 version = "0.1.0"
-#git = "https://github.com/ceigel/embedded-mp3-rust.git"
-path="../embedded-mp3/"
+git = "https://github.com/ceigel/embedded-mp3-rust.git"
+#path="../embedded-mp3/"
 
 [dependencies.stm32l4xx-hal]
 features = ["stm32l4x1", "rt"]
 version = "0.6.0"
-#git = "https://github.com/stm32-rs/stm32l4xx-hal.git"
-path="../stm32l4xx-hal/"
+git = "https://github.com/stm32-rs/stm32l4xx-hal.git"
+#path="../stm32l4xx-hal/"
 
 [dependencies.embedded-sdmmc]
-version = "0.3.0"
 git = "https://github.com/rust-embedded-community/embedded-sdmmc-rs.git"
+#path="../embedded-sdmmc-rs/"
 branch = "develop"
 
 [dependencies.cast]
 default-features = false
-version = "0.2"
+version = "0.2.7"
 
 # this lets you use `cargo fix`!
 [[bin]]

@@ -1,6 +1,5 @@
 use crate::state::{State, StateLeds};
 use core::time::Duration;
-use cortex_m;
 
 pub struct SleepManager {
     current_click_count: u32,

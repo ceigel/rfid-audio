@@ -93,7 +93,7 @@ where
         controller
             .device()
             .init()
-            .map_err(|e| sdmmc::Error::DeviceError(e))?;
+            .map_err(sdmmc::Error::DeviceError)?;
         controller.device().spi().reclock(freq, clocks);
         let volume = controller.get_volume(sdmmc::VolumeIdx(0))?;
         let root_dir = controller.open_root_dir(&volume)?;
@@ -124,7 +124,7 @@ where
             .controller
             .open_dir(&self.volume, &self.root_dir, directory_name)?;
         let dir_name = sdmmc::ShortFileName::create_from_str(directory_name)
-            .map_err(|e| FileError::FilenameError(e))?;
+            .map_err(FileError::FilenameError)?;
         Ok(Playlist::new(dir, dir_name))
     }
 
@@ -165,15 +165,15 @@ where
         let mut write_buf: [u8; WRITE_BUF_LEN] = [0; WRITE_BUF_LEN];
 
         let directory_name_bytes = directory_name.as_bytes();
-        let mut cards = buf[..sz_read]
-            .rsplit(|c| *c == '\r' as u8 || *c == '\n' as u8)
-            .filter(|s| s.len() != 0)
+        let cards = buf[..sz_read]
+            .rsplit(|c| *c == b'\r' || *c == b'\n')
+            .filter(|s| !s.is_empty())
             .take(MAX_UNKNOWN)
             .filter(|n| *n != directory_name_bytes)
             .chain(core::iter::once(directory_name_bytes));
         write_buf[0..BOM.len()].copy_from_slice(&BOM);
         let mut write_idx = BOM.len();
-        while let Some(card) = cards.next() {
+        for card in cards {
             write_buf[write_idx..(write_idx + PLAYLIST_NAME_LEN)].copy_from_slice(card);
             write_idx += PLAYLIST_NAME_LEN;
             write_buf[write_idx..(write_idx + END_LINE.len())].copy_from_slice(END_LINE.as_bytes());
