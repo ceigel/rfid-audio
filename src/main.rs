@@ -120,7 +120,7 @@ fn init_spi1(
     Spi::spi1(spi1, (sck, miso, mosi), spi_mode, freq, *clocks, apb2)
 }
 
-type RFIDReaderType = Mfrc522<Spi2Type, v1_compat::OldOutputPin<gpioa::PA8<Output<PushPull>>>>;
+pub type RFIDReaderType = Mfrc522<Spi2Type, v1_compat::OldOutputPin<gpioa::PA8<Output<PushPull>>>>;
 
 fn init_spi2(
     spi2: hal::stm32::SPI2,
@@ -187,6 +187,11 @@ impl<T: CountDown<Time = hal::time::Hertz>> DelayUs<u32> for DelayTimer<T> {
     }
 }
 
+fn set_shutdown_mode(core: &mut rtic::Peripherals, pwr: &mut hal::stm32::PWR) {
+    core.SCB.set_sleepdeep();
+    pwr.cr1.modify(|_, w| unsafe { w.lpms().bits(0b100) });
+}
+
 #[app(device = stm32l4xx_hal::stm32, monotonic = rtic::cyccnt::CYCCNT, peripherals = true)]
 const APP: () = {
     struct Resources {
@@ -211,9 +216,10 @@ const APP: () = {
         let mut core = cx.core;
         core.DCB.enable_trace();
         core.DWT.enable_cycle_counter();
-        core.SCB.set_sleepdeep();
 
-        let device = cx.device;
+        let mut device = cx.device;
+        set_shutdown_mode(&mut core, &mut device.PWR);
+
         let mut rcc = device.RCC.constrain();
         let mut gpioa = device.GPIOA.split(&mut rcc.ahb2);
 
@@ -348,7 +354,7 @@ const APP: () = {
     }
 
     #[task(resources=[playing_resources, user_cyclic_time, rfid_reader, buttons, btn_click_debase, sleep_manager], priority=8, spawn=[start_playlist], schedule=[user_cyclic, btn_pressed])]
-    fn user_cyclic(cx: user_cyclic::Context) {
+    fn user_cyclic(mut cx: user_cyclic::Context) {
         let mut uid_hex: [u8; 8] = [0; 8];
         if let Some(uid) = rfid_read_card(cx.resources.rfid_reader) {
             hex::encode_to_slice(&uid.bytes()[0..4], &mut uid_hex[..]);
@@ -367,10 +373,13 @@ const APP: () = {
         }
 
         let user_cyclic_time = *cx.resources.user_cyclic_time;
-        let sound_device = &cx.resources.playing_resources.sound_device;
-        cx.resources
-            .sleep_manager
-            .click(sound_device.is_playing(), &mut cx.resources.playing_resources.state_leds);
+        let sound_device = &mut cx.resources.playing_resources.sound_device;
+        cx.resources.sleep_manager.click(
+            sound_device.is_playing(),
+            &mut cx.resources.playing_resources.state_leds,
+            &mut cx.resources.rfid_reader,
+            sound_device,
+        );
         cx.schedule
             .user_cyclic(cx.scheduled + user_cyclic_time)
             .expect("To be able to schedule user_cyclic");
@@ -385,10 +394,15 @@ const APP: () = {
             .expect("To be able to schedule user_cyclic");
     }
 
-    #[task(resources=[playing_resources], priority=8)]
+    #[task(resources=[playing_resources, rfid_reader], priority=1)]
     fn shut_down(cx: shut_down::Context) {
-        let pr = cx.resources.playing_resources;
-        SleepManager::shut_down(&mut pr.state_leds);
+        let mut playing_resources = cx.resources.playing_resources;
+        let mut rfid_reader = cx.resources.rfid_reader;
+        playing_resources.lock(|pr| {
+            rfid_reader.lock(|rfid_reader| {
+                SleepManager::shut_down(&mut pr.state_leds, rfid_reader, &mut pr.sound_device);
+            });
+        });
     }
 
     #[task(resources=[time_computer, battery_reader, charging_line, playing_resources], schedule=[battery_status, shut_down])]

@@ -13,8 +13,12 @@ cortex-m-rtic = {version = "0.5.9", default-features = false, features = ["corte
 panic-itm = "0.4.2"
 log = { "version" = "0.4.14", features = ["max_level_info", "release_max_level_info"] }
 cortex-m-log = { "version" = "0.7.0", features = ["itm", "log-integration"] }
-mfrc522 = "0.2.0"
 nb = "1.0.0"
+
+[dependencies.mfrc522]
+version = "0.2.0"
+#git="https://github.com/ceigel/mfrc522.git"
+path="../mfrc522"
 
 [dependencies.embedded-mp3]
 version = "0.1.0"
