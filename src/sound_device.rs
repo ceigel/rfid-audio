@@ -3,7 +3,6 @@ use crate::mp3_player::{Mp3Player, PlayError};
 use log::{error, info};
 use rtic::cyccnt::{Duration, Instant};
 use stm32l4xx_hal::gpio::{gpioa, Output, PushPull};
-use stm32l4xx_hal::prelude::OutputPin;
 use stm32l4xx_hal::stm32 as stm32l431;
 use stm32l4xx_hal::stm32::Interrupt;
 use stm32l4xx_hal::time;
@@ -59,22 +58,17 @@ pub struct InnerState {
 
 impl InnerState {
     pub fn new(mut audio_en: gpioa::PA12<Output<PushPull>>) -> Self {
-        audio_en.set_low().expect("To be able to re-set audio_en");
+        audio_en.set_low();
 
-        Self {
-            audio_en,
-            stopped: true,
-        }
+        Self { audio_en, stopped: true }
     }
     pub fn set_playing(&mut self) {
         self.stopped = false;
-        self.audio_en
-            .set_high()
-            .expect("To be able to set audio_en");
+        self.audio_en.set_high();
     }
     pub fn set_stopped(&mut self) {
         self.stopped = true;
-        self.audio_en.set_low().expect("To be able to set audio_en");
+        self.audio_en.set_low();
     }
     pub fn is_playing(&self) -> bool {
         !self.stopped
@@ -135,9 +129,7 @@ impl<'a> SoundDevice<'a> {
         self.stop_playing();
         self.fill_pcm_buffer(0, mp3_player, data_reader, directory_navigator)?;
         self.fill_pcm_buffer(1, mp3_player, data_reader, directory_navigator)?;
-        let freq = mp3_player
-            .last_frame_rate
-            .ok_or(PlayError::NoValidMp3Frame)?;
+        let freq = mp3_player.last_frame_rate.ok_or(PlayError::NoValidMp3Frame)?;
         let arr = (self.sysclk_freq.0 / freq.0) as u16;
         self.tim6.arr.write(|w| w.arr().bits(arr));
         self.tim6.cr1.modify(|_, w| w.cen().enabled());
@@ -160,13 +152,8 @@ impl<'a> SoundDevice<'a> {
         self.inner_state.is_playing()
     }
     pub fn play_pause_elapsed(&self) -> Option<Duration> {
-        self.play_pause_start.and_then(|t| {
-            if Instant::now() < t {
-                None
-            } else {
-                Some(t.elapsed())
-            }
-        })
+        self.play_pause_start
+            .and_then(|t| if Instant::now() < t { None } else { Some(t.elapsed()) })
     }
 
     pub fn fill_pcm_buffer(
@@ -185,19 +172,14 @@ impl<'a> SoundDevice<'a> {
         let filled = mp3_player.next_frame(dma_buffer_slice);
         let end_index = filled + buffer_index * (buffer_len / 2);
         if filled < buffer_len / 2 {
-            info!(
-                "Finishing music buffer_index: {}, filled:{}",
-                buffer_index, filled,
-            );
+            info!("Finishing music buffer_index: {}, filled:{}", buffer_index, filled,);
             self.stop_at_buffer_len = Some(end_index);
             Ok(())
         } else {
-            mp3_player
-                .fill_buffer(data_reader, directory_navigator)
-                .map_err(|e| {
-                    self.stop_playing();
-                    e
-                })
+            mp3_player.fill_buffer(data_reader, directory_navigator).map_err(|e| {
+                self.stop_playing();
+                e
+            })
         }
     }
 
@@ -225,9 +207,7 @@ impl<'a> SoundDevice<'a> {
         if self.stopping {
             self.stop_playing();
             state = DmaState::Stopped;
-        } else if self.stop_at_buffer_len.is_some()
-            && (state == DmaState::TriggerComplete || state == DmaState::HalfTrigger)
-        {
+        } else if self.stop_at_buffer_len.is_some() && (state == DmaState::TriggerComplete || state == DmaState::HalfTrigger) {
             state = self.set_dma_stop(state);
         }
         state
@@ -252,9 +232,7 @@ impl<'a> SoundDevice<'a> {
         self.stopping = true;
         let stop_index = self.stop_at_buffer_len.expect("To have stop_index set");
         self.dma1.ccr3.modify(|_, w| w.en().disabled());
-        if (stop_index == 0 && state == DmaState::TriggerComplete)
-            || (stop_index == self.dma_buffer.len() / 2 && state == DmaState::HalfTrigger)
-        {
+        if (stop_index == 0 && state == DmaState::TriggerComplete) || (stop_index == self.dma_buffer.len() / 2 && state == DmaState::HalfTrigger) {
             self.stop_playing();
             DmaState::Stopped
         } else {

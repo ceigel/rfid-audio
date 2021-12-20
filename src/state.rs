@@ -1,11 +1,9 @@
 use crate::hal;
 use crate::hal::hal as embedded_hal;
-use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::PwmPin;
 use hal::gpio::{gpioa, Output, PushPull};
 use hal::pwm::{Pwm, C1, C2, C3, C4};
 use hal::stm32::TIM2;
-use log::error;
 
 #[derive(Debug, PartialEq)]
 #[allow(unused)]
@@ -27,11 +25,6 @@ pub enum State {
     Error,
 }
 
-#[derive(Debug)]
-pub enum Error {
-    GpioError,
-}
-
 struct PwmLed<P: PwmPin<Duty = u32>> {
     led: P,
     duty_idx: usize,
@@ -41,13 +34,11 @@ struct PwmLed<P: PwmPin<Duty = u32>> {
 
 impl<P: PwmPin<Duty = u32>> PwmLed<P> {
     const VALUES_TABLE: [u32; 100] = [
-        0, 2, 11, 25, 44, 69, 100, 137, 179, 228, 282, 343, 409, 483, 562, 648, 741, 841, 949,
-        1063, 1185, 1315, 1453, 1599, 1754, 1917, 2089, 2271, 2462, 2663, 2874, 3096, 3328, 3571,
-        3826, 4092, 4371, 4661, 4964, 5280, 5610, 5953, 6309, 6680, 7064, 7463, 7877, 8306, 8749,
-        9208, 9681, 10170, 10674, 11193, 11727, 12275, 12838, 13415, 14006, 14610, 15227, 15857,
-        16498, 17149, 17811, 18482, 19161, 19847, 20539, 21235, 21935, 22636, 23338, 24038, 24736,
-        25429, 26115, 26794, 27462, 28118, 28761, 29388, 29997, 30587, 31155, 31700, 32220, 32712,
-        33176, 33609, 34011, 34379, 34712, 35009, 35269, 35490, 35672, 35815, 35917, 35979,
+        0, 2, 11, 25, 44, 69, 100, 137, 179, 228, 282, 343, 409, 483, 562, 648, 741, 841, 949, 1063, 1185, 1315, 1453, 1599, 1754, 1917, 2089, 2271,
+        2462, 2663, 2874, 3096, 3328, 3571, 3826, 4092, 4371, 4661, 4964, 5280, 5610, 5953, 6309, 6680, 7064, 7463, 7877, 8306, 8749, 9208, 9681,
+        10170, 10674, 11193, 11727, 12275, 12838, 13415, 14006, 14610, 15227, 15857, 16498, 17149, 17811, 18482, 19161, 19847, 20539, 21235, 21935,
+        22636, 23338, 24038, 24736, 25429, 26115, 26794, 27462, 28118, 28761, 29388, 29997, 30587, 31155, 31700, 32220, 32712, 33176, 33609, 34011,
+        34379, 34712, 35009, 35269, 35490, 35672, 35815, 35917, 35979,
     ];
     pub(crate) fn new(pwm: P, revert: bool) -> Self {
         Self {
@@ -78,11 +69,7 @@ impl<P: PwmPin<Duty = u32>> PwmLed<P> {
         } else if !self.light_level_increases && current_idx == 0 {
             self.light_level_increases = true;
         }
-        self.duty_idx = if self.light_level_increases {
-            current_idx + 1
-        } else {
-            current_idx - 1
-        };
+        self.duty_idx = if self.light_level_increases { current_idx + 1 } else { current_idx - 1 };
         self.led.set_duty(Self::VALUES_TABLE[self.duty_idx]);
     }
 }
@@ -120,17 +107,13 @@ impl StateLeds {
     pub fn set_state(&mut self, state: State) {
         self.state = state;
         self.display_count = 0;
-        if let Err(Error::GpioError) = self.update_state() {
-            error!("Can't set leds");
-        }
+        self.update_state();
     }
 
     pub fn show_state(&mut self) {
         self.display_count = self.display_count.wrapping_add(1);
         self.auto_transition();
-        if let Err(Error::GpioError) = self.display() {
-            error!("Can't set leds");
-        }
+        self.display();
     }
 
     fn auto_transition(&mut self) {
@@ -139,38 +122,36 @@ impl StateLeds {
         }
     }
 
-    fn display(&mut self) -> Result<(), self::Error> {
+    fn display(&mut self) {
         match &self.state {
             State::Error => {
                 self.nose_r.update_modulated();
             }
             State::Playing => {
                 self.nose_g.update_modulated();
-                self.eye.set_high().expect("Infallible");
+                self.eye.set_high();
             }
             State::NotPlaying => {
                 self.nose_b.update_modulated();
-                self.eye.set_high().expect("Infallible");
+                self.eye.set_high();
             }
             State::PlaylistNotFound => {
                 self.nose_r.update_modulated();
-                self.eye.set_high().expect("Infallible");
+                self.eye.set_high();
             }
             State::ShuttingDown => {
                 self.mouth.update_modulated();
-                self.eye.set_high().expect("Infallible");
+                self.eye.set_high();
             }
             _ => {}
         }
-
-        Ok(())
     }
 
-    fn update_state(&mut self) -> Result<(), self::Error> {
+    fn update_state(&mut self) {
         self.reset();
         match &self.state {
             State::Init(init_state) => match init_state {
-                InitState::Begin => self.eye.set_high().map_err(|_| self::Error::GpioError)?,
+                InitState::Begin => self.eye.set_high(),
                 InitState::SetSDCard => self.nose_b.set_duty(1.0),
                 InitState::SetRFID => self.nose_r.set_duty(1.0),
                 InitState::InitADC => self.nose_g.set_duty(1.0),
@@ -180,14 +161,14 @@ impl StateLeds {
                 }
             },
             State::ShutDown => {
-                self.eye.set_low().ok();
+                self.eye.set_low();
                 self.nose_r.disable();
                 self.nose_g.disable();
                 self.nose_b.disable();
                 self.mouth.disable();
             }
             State::ShuttingDown => {
-                self.eye.set_low().ok();
+                self.eye.set_low();
                 self.nose_r.set_duty(0.0);
                 self.nose_g.set_duty(0.0);
                 self.nose_b.set_duty(0.0);
@@ -195,7 +176,7 @@ impl StateLeds {
             }
             State::Error => {
                 self.mouth.set_duty(0.0);
-                self.eye.set_low().ok();
+                self.eye.set_low();
             }
             State::Playing => {
                 self.mouth.set_duty(1.0);
@@ -208,11 +189,11 @@ impl StateLeds {
             }
         }
 
-        self.display()
+        self.display();
     }
 
     fn init_leds(&mut self) {
-        self.eye.set_low().ok();
+        self.eye.set_low();
         self.nose_r.enable();
         self.nose_g.enable();
         self.nose_b.enable();

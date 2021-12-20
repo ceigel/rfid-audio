@@ -1,4 +1,4 @@
-use crate::hal::gpio::{gpiob, Floating, Input, PullUp};
+use crate::hal::gpio::{gpiob, Floating, Input, PullUp, MODER, PUPDR};
 pub enum ButtonKind {
     Previous,
     Pause,
@@ -16,8 +16,8 @@ impl Buttons {
         prev: gpiob::PB12<Input<Floating>>,
         pause: gpiob::PB10<Input<Floating>>,
         next: gpiob::PB2<Input<Floating>>,
-        moder: &mut gpiob::MODER,
-        pupdr: &mut gpiob::PUPDR,
+        moder: &mut MODER<'B'>,
+        pupdr: &mut PUPDR<'B'>,
     ) -> Self {
         let button_next = next.into_pull_up_input(moder, pupdr);
         let button_prev = prev.into_pull_up_input(moder, pupdr);

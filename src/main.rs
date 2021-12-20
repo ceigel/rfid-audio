@@ -13,7 +13,6 @@ mod cycles_computer;
 mod data_reader;
 mod hex;
 mod mp3_player;
-mod pause_point;
 mod playlist;
 mod sleep_manager;
 mod sound_device;
@@ -33,9 +32,7 @@ use cortex_m_log::printer::itm::InterruptSync;
 use cycles_computer::CyclesComputer;
 use embedded_hal::digital::v1_compat;
 use hal::adc::ADC;
-use hal::gpio::{
-    gpioa, gpiob, Alternate, Analog, Floating, Input, OpenDrain, Output, PushPull, AF5,
-};
+use hal::gpio::{gpioa, gpiob, Alternate, Analog, Floating, Input, OpenDrain, Output, PushPull};
 use hal::hal as embedded_hal;
 use hal::spi::Spi;
 use hal::time::Hertz;
@@ -82,43 +79,35 @@ impl Buffers {
 }
 static mut BUFFERS: Buffers = Buffers::new();
 
-fn init_clocks(
-    cfgr: hal::rcc::CFGR,
-    mut flash: hal::flash::Parts,
-    mut pwr: hal::pwr::Pwr,
-) -> hal::rcc::Clocks {
-    cfgr.hse(
-        8.mhz(),
-        hal::rcc::CrystalBypass::Disable,
-        hal::rcc::ClockSecuritySystem::Disable,
-    )
-    .pll_source(hal::rcc::PllSource::HSE)
-    .sysclk(72.mhz())
-    .hclk(72.mhz())
-    .pclk2(72.mhz())
-    .pclk1(72.mhz())
-    .freeze(&mut flash.acr, &mut pwr)
+fn init_clocks(cfgr: hal::rcc::CFGR, mut flash: hal::flash::Parts, mut pwr: hal::pwr::Pwr) -> hal::rcc::Clocks {
+    cfgr.hse(8.mhz(), hal::rcc::CrystalBypass::Disable, hal::rcc::ClockSecuritySystem::Disable)
+        .pll_source(hal::rcc::PllSource::HSE)
+        .sysclk(72.mhz())
+        .hclk(72.mhz())
+        .pclk2(72.mhz())
+        .pclk1(72.mhz())
+        .freeze(&mut flash.acr, &mut pwr)
 }
 
 type Spi1Pins = (
-    gpioa::PA5<Alternate<AF5, Input<Floating>>>,
-    gpioa::PA6<Alternate<AF5, Input<Floating>>>,
-    gpioa::PA7<Alternate<AF5, Input<Floating>>>,
+    gpioa::PA5<Alternate<PushPull, 5>>,
+    gpioa::PA6<Alternate<PushPull, 5>>,
+    gpioa::PA7<Alternate<PushPull, 5>>,
 );
 
 type Spi2Pins = (
-    gpiob::PB13<Alternate<AF5, Input<Floating>>>,
-    gpiob::PB14<Alternate<AF5, Input<Floating>>>,
-    gpiob::PB15<Alternate<AF5, Input<Floating>>>,
+    gpiob::PB13<Alternate<PushPull, 5>>,
+    gpiob::PB14<Alternate<PushPull, 5>>,
+    gpiob::PB15<Alternate<PushPull, 5>>,
 );
 pub(crate) type Spi1Type = Spi<hal::stm32::SPI1, Spi1Pins>;
 pub(crate) type Spi2Type = Spi<hal::stm32::SPI2, Spi2Pins>;
 
 fn init_spi1(
     spi1: hal::stm32::SPI1,
-    sck: gpioa::PA5<Alternate<AF5, Input<Floating>>>,
-    miso: gpioa::PA6<Alternate<AF5, Input<Floating>>>,
-    mosi: gpioa::PA7<Alternate<AF5, Input<Floating>>>,
+    sck: gpioa::PA5<Alternate<PushPull, 5>>,
+    miso: gpioa::PA6<Alternate<PushPull, 5>>,
+    mosi: gpioa::PA7<Alternate<PushPull, 5>>,
     apb2: &mut hal::rcc::APB2,
     clocks: &hal::rcc::Clocks,
     freq: impl Into<Hertz>,
@@ -135,9 +124,9 @@ type RFIDReaderType = Mfrc522<Spi2Type, v1_compat::OldOutputPin<gpioa::PA8<Outpu
 
 fn init_spi2(
     spi2: hal::stm32::SPI2,
-    sck: gpiob::PB13<Alternate<AF5, Input<Floating>>>,
-    miso: gpiob::PB14<Alternate<AF5, Input<Floating>>>,
-    mosi: gpiob::PB15<Alternate<AF5, Input<Floating>>>,
+    sck: gpiob::PB13<Alternate<PushPull, 5>>,
+    miso: gpiob::PB14<Alternate<PushPull, 5>>,
+    mosi: gpiob::PB15<Alternate<PushPull, 5>>,
     apb1: &mut hal::rcc::APB1R1,
     clocks: &hal::rcc::Clocks,
     freq: impl Into<Hertz>,
@@ -151,12 +140,11 @@ fn init_spi2(
 }
 
 fn init_rfid_reader(spi2: Spi2Type, cs2: gpioa::PA8<Output<PushPull>>) -> RFIDReaderType {
-    let rfid_reader =
-        Mfrc522::new(spi2, v1_compat::OldOutputPin::new(cs2)).and_then(|mut rfid_reader| {
-            let version = rfid_reader.version()?;
-            info!("RFID reader version: 0x{:0x}", version);
-            Ok((rfid_reader, version))
-        });
+    let rfid_reader = Mfrc522::new(spi2, v1_compat::OldOutputPin::new(cs2)).and_then(|mut rfid_reader| {
+        let version = rfid_reader.version()?;
+        info!("RFID reader version: 0x{:0x}", version);
+        Ok((rfid_reader, version))
+    });
     match rfid_reader {
         Ok((rfid_reader, version)) => {
             if version != 0x92 && version != 0x93 {
@@ -243,40 +231,26 @@ const APP: () = {
         cortex_m_log::log::init(logger).expect("To set logger");
 
         let mut gpiob = device.GPIOB.split(&mut rcc.ahb2);
-        let led_nose_b = gpioa
-            .pa0
-            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper)
-            .into_af1(&mut gpioa.moder, &mut gpioa.afrl);
-        let led_nose_g = gpioa
-            .pa1
-            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper)
-            .into_af1(&mut gpioa.moder, &mut gpioa.afrl);
-        let led_nose_r = gpioa
-            .pa2
-            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper)
-            .into_af1(&mut gpioa.moder, &mut gpioa.afrl);
-        let led_eye = gpioa
-            .pa11
-            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
-        let led_mouth = gpiob
-            .pb11
-            .into_push_pull_output(&mut gpiob.moder, &mut gpiob.otyper)
-            .into_af1(&mut gpiob.moder, &mut gpiob.afrh);
-        let tim2_pwm = device.TIM2.pwm(
-            (led_nose_b, led_nose_g, led_nose_r, led_mouth),
-            1.khz(),
-            clocks,
-            &mut rcc.apb1r1,
+        let led_nose_b = gpioa.pa0.into_alternate::<1>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl);
+        let led_nose_g = gpioa.pa1.into_alternate::<1>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl);
+        let led_nose_r = gpioa.pa2.into_alternate::<1>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl);
+        let led_eye = gpioa.pa11.into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
+        let led_mouth = gpiob.pb11.into_push_pull_output(&mut gpiob.moder, &mut gpiob.otyper).into_alternate::<1>(
+            &mut gpiob.moder,
+            &mut gpiob.otyper,
+            &mut gpiob.afrh,
         );
-        let mut state_leds =
-            state::StateLeds::new(tim2_pwm.0, tim2_pwm.1, tim2_pwm.2, led_eye, tim2_pwm.3);
+        let tim2_pwm = device
+            .TIM2
+            .pwm((led_nose_b, led_nose_g, led_nose_r, led_mouth), 1.khz(), clocks, &mut rcc.apb1r1);
+        let mut state_leds = state::StateLeds::new(tim2_pwm.0, tim2_pwm.1, tim2_pwm.2, led_eye, tim2_pwm.3);
         state_leds.set_state(state::State::Init(state::InitState::Begin));
 
         let spi1 = init_spi1(
             device.SPI1,
-            gpioa.pa5.into_af5(&mut gpioa.moder, &mut gpioa.afrl),
-            gpioa.pa6.into_af5(&mut gpioa.moder, &mut gpioa.afrl),
-            gpioa.pa7.into_af5(&mut gpioa.moder, &mut gpioa.afrl),
+            gpioa.pa5.into_alternate::<5>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl),
+            gpioa.pa6.into_alternate::<5>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl),
+            gpioa.pa7.into_alternate::<5>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl),
             &mut rcc.apb2,
             &clocks,
             250.khz(),
@@ -284,9 +258,9 @@ const APP: () = {
 
         let spi2 = init_spi2(
             device.SPI2,
-            gpiob.pb13.into_af5(&mut gpiob.moder, &mut gpiob.afrh),
-            gpiob.pb14.into_af5(&mut gpiob.moder, &mut gpiob.afrh),
-            gpiob.pb15.into_af5(&mut gpiob.moder, &mut gpiob.afrh),
+            gpiob.pb13.into_alternate::<5>(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrh),
+            gpiob.pb14.into_alternate::<5>(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrh),
+            gpiob.pb15.into_alternate::<5>(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrh),
             &mut rcc.apb1r1,
             &clocks,
             250.khz(),
@@ -294,13 +268,9 @@ const APP: () = {
 
         gpioa_pupdr().write(|w| w.pupdr6().pull_up().pupdr8().pull_up());
 
-        let mut cs1 = gpioa
-            .pa3
-            .into_open_drain_output(&mut gpioa.moder, &mut gpioa.otyper);
-        cs1.set_high().expect("To be able to set CS1 to high");
-        let cs2 = gpioa
-            .pa8
-            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
+        let mut cs1 = gpioa.pa3.into_open_drain_output(&mut gpioa.moder, &mut gpioa.otyper);
+        cs1.set_high();
+        let cs2 = gpioa.pa8.into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
 
         state_leds.set_state(state::State::Init(state::InitState::SetSDCard));
         let card_reader = SdCardReader::new(spi1, cs1, 8.mhz(), clocks)
@@ -314,45 +284,22 @@ const APP: () = {
         let rfid_reader = init_rfid_reader(spi2, cs2);
 
         let audio_out = gpioa.pa4.into_analog(&mut gpioa.moder, &mut gpioa.pupdr); // Speaker out
-        let mut audio_en = gpioa
-            .pa12
-            .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
-        audio_en.set_low().expect("To set audio_en low");
+        let mut audio_en = gpioa.pa12.into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
+        audio_en.set_low();
 
         let buffers = unsafe { &mut BUFFERS };
         let mp3_player = Mp3Player::new(&mut buffers.mp3_data, &mut buffers.pcm_buffer);
 
-        let sound_device = SoundDevice::new(
-            &mut buffers.dma_buffer,
-            clocks.sysclk(),
-            device.TIM6,
-            device.DAC1,
-            device.DMA1,
-            audio_en,
-        );
+        let sound_device = SoundDevice::new(&mut buffers.dma_buffer, clocks.sysclk(), device.TIM6, device.DAC1, device.DMA1, audio_en);
 
         let tim7 = hal::timer::Timer::tim7(device.TIM7, 1.mhz(), clocks, &mut rcc.apb1r1);
         let mut delay = DelayTimer::new(tim7);
-        let adc = ADC::new(
-            device.ADC1,
-            device.ADC_COMMON,
-            &mut rcc.ahb2,
-            &mut rcc.ccipr,
-            &mut delay,
-        );
+        let adc = ADC::new(device.ADC1, device.ADC_COMMON, &mut rcc.ahb2, &mut rcc.ccipr, &mut delay);
         let adc_in = gpiob.pb0.into_analog(&mut gpiob.moder, &mut gpiob.pupdr);
         let battery_reader = battery_voltage::BatteryReader::new(adc, adc_in);
-        let charging_line = gpioa
-            .pa15
-            .into_floating_input(&mut gpioa.moder, &mut gpioa.pupdr);
+        let charging_line = gpioa.pa15.into_floating_input(&mut gpioa.moder, &mut gpioa.pupdr);
 
-        let buttons = Buttons::new(
-            gpiob.pb12,
-            gpiob.pb10,
-            gpiob.pb2,
-            &mut gpiob.moder,
-            &mut gpiob.pupdr,
-        );
+        let buttons = Buttons::new(gpiob.pb12, gpiob.pb10, gpiob.pb2, &mut gpiob.moder, &mut gpiob.pupdr);
 
         cx.spawn
             .start_playlist(PlaylistName::from_bytes("49DFFE97".as_bytes())) // winamp intro
@@ -361,9 +308,7 @@ const APP: () = {
             .expect("To start playlist");
         cx.spawn.user_cyclic().expect("To start user cyclic task");
         cx.spawn.leds_cyclic().expect("To start leds cyclic task");
-        cx.spawn
-            .battery_status()
-            .expect("To start battery status task");
+        cx.spawn.battery_status().expect("To start battery status task");
 
         let time_computer = CyclesComputer::new(clocks.sysclk());
         let btn_click_debase = time_computer.to_cycles(BTN_CLICK_DEBASE);
@@ -413,22 +358,19 @@ const APP: () = {
 
         let btns = cx.resources.buttons;
         let sched_next = cx.scheduled + *cx.resources.btn_click_debase;
-        if btns.button_next.is_low().expect("To read button next") {
+        if btns.button_next.is_low() {
             cx.schedule.btn_pressed(sched_next, ButtonKind::Next).ok();
-        } else if btns.button_prev.is_low().expect("To read button prev") {
-            cx.schedule
-                .btn_pressed(sched_next, ButtonKind::Previous)
-                .ok();
-        } else if btns.button_pause.is_low().expect("To read button pause") {
+        } else if btns.button_prev.is_low() {
+            cx.schedule.btn_pressed(sched_next, ButtonKind::Previous).ok();
+        } else if btns.button_pause.is_low() {
             cx.schedule.btn_pressed(sched_next, ButtonKind::Pause).ok();
         }
 
         let user_cyclic_time = *cx.resources.user_cyclic_time;
         let sound_device = &cx.resources.playing_resources.sound_device;
-        cx.resources.sleep_manager.click(
-            sound_device.is_playing(),
-            &mut cx.resources.playing_resources.state_leds,
-        );
+        cx.resources
+            .sleep_manager
+            .click(sound_device.is_playing(), &mut cx.resources.playing_resources.state_leds);
         cx.schedule
             .user_cyclic(cx.scheduled + user_cyclic_time)
             .expect("To be able to schedule user_cyclic");
@@ -437,9 +379,7 @@ const APP: () = {
     #[task(resources=[leds_cyclic_time, playing_resources], schedule=[leds_cyclic])]
     fn leds_cyclic(mut cx: leds_cyclic::Context) {
         let leds_cyclic_time = *cx.resources.leds_cyclic_time;
-        cx.resources
-            .playing_resources
-            .lock(|pr| pr.state_leds.show_state());
+        cx.resources.playing_resources.lock(|pr| pr.state_leds.show_state());
         cx.schedule
             .leds_cyclic(cx.scheduled + leds_cyclic_time)
             .expect("To be able to schedule user_cyclic");
@@ -457,7 +397,7 @@ const APP: () = {
         let val = cx.resources.battery_reader.read();
         let tc = cx.resources.time_computer;
         let elapsed = tc.from_cycles(start.elapsed());
-        let charging = cx.resources.charging_line.is_low().unwrap_or(false);
+        let charging = cx.resources.charging_line.is_low();
         let mut shut_down = false;
         info!("Battery value: {}, elapsed: {}us", val, elapsed.as_micros());
         cx.resources.playing_resources.lock(|pr| {
@@ -513,10 +453,7 @@ const APP: () = {
         let mut play_successful = false;
         current_playlist.lock(|playlist| {
             playing_resources.lock(|pr| {
-                let same_playlist = playlist
-                    .as_ref()
-                    .map(|p| directory_name == p.name())
-                    .unwrap_or(false);
+                let same_playlist = playlist.as_ref().map(|p| directory_name == p.name()).unwrap_or(false);
                 let at_begining = pr
                     .sound_device
                     .play_pause_elapsed()
@@ -605,20 +542,12 @@ const APP: () = {
     #[task(capacity=1, priority=8, resources=[playing_resources, current_playlist], spawn=[playlist_next])]
     fn process_dma_request(cx: process_dma_request::Context, new_state: DmaState) {
         let pr = cx.resources.playing_resources;
-        let playlist = cx
-            .resources
-            .current_playlist
-            .as_mut()
-            .expect("to have a playlist to play");
+        let playlist = cx.resources.current_playlist.as_mut().expect("to have a playlist to play");
         let current_song = playlist.current_song().expect("to play a song");
         match new_state {
             DmaState::Unknown => panic!("Unknown dma state"),
             DmaState::HalfTrigger | DmaState::TriggerComplete => {
-                let index = if new_state == DmaState::HalfTrigger {
-                    0
-                } else {
-                    1
-                };
+                let index = if new_state == DmaState::HalfTrigger { 0 } else { 1 };
                 if pr
                     .sound_device
                     .fill_pcm_buffer(index, &mut pr.mp3_player, current_song, &mut pr.card_reader)
