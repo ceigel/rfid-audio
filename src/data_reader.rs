@@ -37,6 +37,14 @@ impl DataReader {
         })
     }
 
+    pub fn open_file_in_dir(
+        directory_navigator: &mut impl DirectoryNavigator,
+        file_name: &sdmmc::ShortFileName,
+        directory: &sdmmc::Directory,
+    ) -> Result<DataReader, FileError> {
+        directory_navigator.open_file_in_dir(file_name, directory)
+    }
+
     pub fn read_data(
         &mut self,
         directory_navigator: &mut impl DirectoryNavigator,
@@ -55,6 +63,10 @@ impl DataReader {
 
     pub fn remaining(&self) -> u32 {
         self.file.left()
+    }
+
+    pub fn offset(&self) -> u32 {
+        self.file.length() - self.file.left()
     }
 
     pub fn seek_from_start(&mut self, offset: u32) -> Result<(), ()> {
@@ -204,6 +216,11 @@ pub trait DirectoryNavigator {
         extension: &str,
         comp: impl Fn(&sdmmc::DirEntry, &sdmmc::DirEntry) -> bool,
     ) -> Result<Option<sdmmc::DirEntry>, FileError>;
+    fn open_file_in_dir(
+        &mut self,
+        file_name: &sdmmc::ShortFileName,
+        directory: &sdmmc::Directory,
+    ) -> Result<DataReader, FileError>;
     fn close_dir(&mut self, dir: sdmmc::Directory);
 }
 
@@ -265,5 +282,29 @@ where
 
     fn close_dir(&mut self, directory: sdmmc::Directory) {
         self.controller.close_dir(&self.volume, directory);
+    }
+
+    fn open_file_in_dir(
+        &mut self,
+        file_name: &sdmmc::ShortFileName,
+        directory: &sdmmc::Directory,
+    ) -> Result<DataReader, FileError> {
+        let mut open_file: Option<sdmmc::DirEntry> = None;
+        self.controller
+            .iterate_dir(&self.volume, directory, |dir_entry: &sdmmc::DirEntry| {
+                if dir_entry.name == *file_name {
+                    open_file.replace(dir_entry.clone());
+                }
+            })?;
+        match open_file {
+            Some(de) => self
+                .controller
+                .open_dir_entry(&mut self.volume, de.clone(), sdmmc::Mode::ReadOnly)
+                .map(|file| DataReader {
+                    file: file,
+                    dir_entry: de,
+                }),
+            None => Err(FileError::FileNotFound),
+        }
     }
 }

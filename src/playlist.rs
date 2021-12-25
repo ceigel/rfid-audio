@@ -1,4 +1,6 @@
 use crate::data_reader::{DataReader, DirectoryNavigator, FileError};
+use crate::playing_memento::PlayingMemento;
+use crate::CardReader;
 use embedded_sdmmc as sdmmc;
 
 pub const PLAYLIST_NAME_LEN: usize = 8;
@@ -9,7 +11,7 @@ pub enum PlaylistMoveDirection {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct PlaylistName {
+pub struct PlaylistName {
     pub name: [u8; PLAYLIST_NAME_LEN],
     pub name_len: usize,
 }
@@ -51,9 +53,15 @@ impl PartialEq<PlaylistName> for PlaylistName {
     }
 }
 
+impl From<sdmmc::ShortFileName> for PlaylistName {
+    fn from(sfn: sdmmc::ShortFileName) -> Self {
+        PlaylistName::from_bytes(sfn.base_name())
+    }
+}
+
 pub struct Playlist {
     directory: sdmmc::Directory,
-    directory_name: sdmmc::ShortFileName,
+    directory_name: PlaylistName,
     current_file: Option<DataReader>,
 }
 
@@ -61,9 +69,34 @@ impl Playlist {
     pub fn new(directory: sdmmc::Directory, directory_name: sdmmc::ShortFileName) -> Self {
         Self {
             directory,
-            directory_name,
+            directory_name: directory_name.into(),
             current_file: None,
         }
+    }
+
+    pub fn get_memento(&self, offset_adjustment: u32) -> Option<PlayingMemento> {
+        self.current_file.as_ref().map(|cf| {
+            let offset = cf.offset() - offset_adjustment;
+            PlayingMemento::new(self.directory_name.clone(), cf.file_name(), offset)
+        })
+    }
+
+    pub fn restore_memento(
+        memento: PlayingMemento,
+        card_reader: &mut CardReader,
+    ) -> Result<Self, FileError> {
+        card_reader
+            .open_directory(memento.playlist.as_str())
+            .map(|mut playlist| {
+                let file = card_reader
+                    .open_file_in_dir(&memento.file, &mut playlist.directory)
+                    .map(|mut f| {
+                        f.seek_from_start(memento.offset).ok();
+                        f
+                    });
+                playlist.current_file = file.ok();
+                playlist
+            })
     }
 
     pub fn move_next(
@@ -98,11 +131,19 @@ impl Playlist {
         Ok(self.current_song())
     }
 
+    fn open_file(
+        &self,
+        file_name: &sdmmc::ShortFileName,
+        card_reader: &mut CardReader,
+    ) -> Result<DataReader, FileError> {
+        card_reader.open_file_in_dir(file_name, &self.directory)
+    }
+
     pub fn current_song(&mut self) -> Option<&mut DataReader> {
         self.current_file.as_mut()
     }
 
-    pub fn name(&self) -> sdmmc::ShortFileName {
+    pub fn name(&self) -> PlaylistName {
         self.directory_name.clone()
     }
 

@@ -2,7 +2,8 @@ MEMORY
 {
   /* NOTE K = KiBi = 1024 bytes */
   /* TODO Adjust these memory regions to match your device memory layout */
-  FLASH : ORIGIN = 0x8000000, LENGTH = 256K
+  /* -2K for the page 255 to be left free for playlist memento */
+  FLASH : ORIGIN = 0x8000000, LENGTH = 256K - 2K
   RAM : ORIGIN = 0x20000000, LENGTH = 64K
 }
 
@@ -21,3 +22,4 @@ MEMORY
 
 /* Size of the heap (in bytes) */
 /* _heap_size = 1024; */
+

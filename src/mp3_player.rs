@@ -151,6 +151,10 @@ impl<'a> Mp3Player<'a> {
         Ok(())
     }
 
+    pub fn bytes_already_read(&self) -> usize {
+        self.write_index - self.read_index
+    }
+
     pub fn next_frame(&mut self, dma_buffer: &mut [u16]) -> usize {
         let mut index: usize = 0;
         loop {

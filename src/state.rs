@@ -5,7 +5,7 @@ use hal::gpio::{gpioa, Output, PushPull};
 use hal::pwm::{Pwm, C1, C2, C3, C4};
 use hal::stm32::TIM2;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 #[allow(unused)]
 pub enum InitState {
     Begin,
@@ -15,6 +15,7 @@ pub enum InitState {
     InitFinished,
 }
 
+#[derive(Clone, Copy)]
 pub enum State {
     Init(InitState),
     Playing,
@@ -102,6 +103,10 @@ impl StateLeds {
         };
         s.init_leds();
         s
+    }
+
+    pub fn get_state(&self) -> State {
+        self.state
     }
 
     pub fn set_state(&mut self, state: State) {

@@ -51,27 +51,51 @@ impl DebuggingData {
     }
 }
 
+#[derive(PartialEq, Clone, Copy)]
+pub enum InnerStateVals {
+    Stopped,
+    Paused,
+    Playing,
+}
+
 pub struct InnerState {
     audio_en: gpioa::PA12<Output<PushPull>>,
-    stopped: bool,
+    state: InnerStateVals,
 }
 
 impl InnerState {
     pub fn new(mut audio_en: gpioa::PA12<Output<PushPull>>) -> Self {
         audio_en.set_low();
-
-        Self { audio_en, stopped: true }
+        Self {
+            audio_en,
+            state: InnerStateVals::Stopped,
+        }
     }
     pub fn set_playing(&mut self) {
-        self.stopped = false;
-        self.audio_en.set_high();
+        self.state = InnerStateVals::Playing;
+        self.enable_audio();
     }
+
     pub fn set_stopped(&mut self) {
-        self.stopped = true;
+        self.state = InnerStateVals::Stopped;
+        self.disable_audio();
+    }
+
+    pub fn set_paused(&mut self) {
+        self.state = InnerStateVals::Paused;
+        self.disable_audio();
+    }
+
+    pub fn state(&self) -> InnerStateVals {
+        self.state
+    }
+
+    fn disable_audio(&mut self) {
         self.audio_en.set_low();
     }
-    pub fn is_playing(&self) -> bool {
-        !self.stopped
+
+    fn enable_audio(&mut self) {
+        self.audio_en.set_high();
     }
 }
 
@@ -149,8 +173,13 @@ impl<'a> SoundDevice<'a> {
     }
 
     pub fn is_playing(&self) -> bool {
-        self.inner_state.is_playing()
+        self.inner_state.state == InnerStateVals::Playing
     }
+
+    pub fn is_paused(&self) -> bool {
+        self.inner_state.state == InnerStateVals::Paused
+    }
+
     pub fn play_pause_elapsed(&self) -> Option<Duration> {
         self.play_pause_start
             .and_then(|t| if Instant::now() < t { None } else { Some(t.elapsed()) })
@@ -217,7 +246,7 @@ impl<'a> SoundDevice<'a> {
         if self.tim6.cr1.read().cen().is_enabled() {
             self.inner_state.set_playing();
         } else {
-            self.inner_state.set_stopped();
+            self.inner_state.set_paused();
         }
     }
 

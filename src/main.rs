@@ -13,6 +13,7 @@ mod cycles_computer;
 mod data_reader;
 mod hex;
 mod mp3_player;
+mod playing_memento;
 mod playlist;
 mod sleep_manager;
 mod sound_device;
@@ -43,6 +44,7 @@ use embedded_hal::blocking::delay::DelayUs;
 use embedded_hal::timer::CountDown;
 use log::{error, info};
 use mfrc522::{self, Mfrc522};
+use playing_memento::PlayingMemento;
 use rtic::app;
 use stm32l4xx_hal::stm32 as stm32l431;
 
@@ -57,6 +59,8 @@ const SHUTTING_DOWN_TIME: time::Duration = time::Duration::from_secs(5);
 const CARD_SCAN_PAUSE: time::Duration = time::Duration::from_millis(5000);
 const BTN_CLICK_DEBASE: time::Duration = time::Duration::from_millis(500);
 const BATTERY_SHUTDOWN_LEVEL: u16 = 3350;
+
+type CardReader = SdCardReader<hal::gpio::gpioa::PA3<Output<OpenDrain>>>;
 
 fn gpioa_pupdr() -> &'static stm32l431::gpioa::PUPDR {
     unsafe { &(*stm32l431::GPIOA::ptr()).pupdr }
@@ -161,6 +165,18 @@ pub struct PlayingResources {
     pub mp3_player: Mp3Player<'static>,
     pub card_reader: SdCardReader<hal::gpio::gpioa::PA3<Output<OpenDrain>>>,
     pub state_leds: state::StateLeds,
+}
+
+impl PlayingResources {
+    pub fn get_memento(&mut self, playlist: &Option<Playlist>) -> Option<PlayingMemento> {
+        if let Some(playlist) = playlist {
+            if self.sound_device.is_playing() || self.sound_device.is_paused() {
+                let already_read = self.mp3_player.bytes_already_read();
+                return playlist.get_memento(already_read as u32);
+            }
+        }
+        return None;
+    }
 }
 
 fn rfid_read_card(rfid_reader: &mut RFIDReaderType) -> Option<mfrc522::Uid> {
@@ -406,11 +422,13 @@ const APP: () = {
             .expect("To be able to schedule user_cyclic");
     }
 
-    #[task(resources=[playing_resources, rfid_reader], priority=1)]
+    #[task(resources=[playing_resources, rfid_reader, current_playlist], priority=1)]
     fn shut_down(cx: shut_down::Context) {
         let mut playing_resources = cx.resources.playing_resources;
         let mut rfid_reader = cx.resources.rfid_reader;
+        let mut current_playlist = cx.resources.current_playlist;
         playing_resources.lock(|pr| {
+            let memento = current_playlist.lock(|pl| pr.get_memento(&pl));
             rfid_reader.lock(|rfid_reader| {
                 SleepManager::shut_down(&mut pr.state_leds, rfid_reader, &mut pr.sound_device);
             });
