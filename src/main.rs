@@ -252,11 +252,20 @@ const APP: () = {
         let mut state_leds = state::StateLeds::new(tim2_pwm.0, tim2_pwm.1, tim2_pwm.2, led_eye, tim2_pwm.3);
         state_leds.set_state(state::State::Init(state::InitState::Begin));
 
+        let pa5 = gpioa
+            .pa5
+            .into_push_pull_output_in_state(&mut gpioa.moder, &mut gpioa.otyper, PinState::High);
+        let pa6 = gpioa
+            .pa6
+            .into_push_pull_output_in_state(&mut gpioa.moder, &mut gpioa.otyper, PinState::High);
+        let pa7 = gpioa
+            .pa7
+            .into_push_pull_output_in_state(&mut gpioa.moder, &mut gpioa.otyper, PinState::High);
         let spi1 = init_spi1(
             device.SPI1,
-            gpioa.pa5.into_alternate::<5>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl),
-            gpioa.pa6.into_alternate::<5>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl),
-            gpioa.pa7.into_alternate::<5>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl),
+            pa5.into_alternate::<5>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl),
+            pa6.into_alternate::<5>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl),
+            pa7.into_alternate::<5>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl),
             &mut rcc.apb2,
             &clocks,
             250.khz(),
@@ -274,7 +283,10 @@ const APP: () = {
 
         gpioa_pupdr().write(|w| w.pupdr6().pull_up().pupdr8().pull_up());
 
-        let mut cs1 = gpioa.pa3.into_open_drain_output(&mut gpioa.moder, &mut gpioa.otyper);
+        let pa3 = gpioa
+            .pa3
+            .into_push_pull_output_in_state(&mut gpioa.moder, &mut gpioa.otyper, PinState::High);
+        let mut cs1 = pa3.into_open_drain_output(&mut gpioa.moder, &mut gpioa.otyper);
         cs1.set_high();
         let cs2 = gpioa.pa8.into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
 
