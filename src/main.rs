@@ -33,6 +33,7 @@ use cortex_m_log::printer::itm::InterruptSync;
 use cycles_computer::CyclesComputer;
 use embedded_hal::digital::v1_compat;
 use hal::adc::ADC;
+use hal::flash;
 use hal::gpio::{gpioa, gpiob, Alternate, Analog, Floating, Input, OpenDrain, Output, PushPull};
 use hal::hal as embedded_hal;
 use hal::spi::Spi;
@@ -213,7 +214,6 @@ const APP: () = {
     struct Resources {
         playing_resources: PlayingResources,
         audio_out: gpioa::PA4<Analog>,
-        #[init(None)]
         current_playlist: Option<Playlist>,
         buttons: Buttons,
         rfid_reader: RFIDReaderType,
@@ -225,6 +225,7 @@ const APP: () = {
         user_cyclic_time: rtic::cyccnt::Duration,
         leds_cyclic_time: rtic::cyccnt::Duration,
         time_computer: CyclesComputer,
+        current_playing_memento_addr: Option<usize>,
     }
 
     #[init(spawn=[start_playlist, user_cyclic, leds_cyclic, battery_status])]
@@ -307,7 +308,7 @@ const APP: () = {
         let cs2 = gpioa.pa8.into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
 
         state_leds.set_state(state::State::Init(state::InitState::SetSDCard));
-        let card_reader = SdCardReader::new(spi1, cs1, 8.mhz(), clocks)
+        let mut card_reader = SdCardReader::new(spi1, cs1, 8.mhz(), clocks)
             .map_err(|e| {
                 error!("Card reader init failed: {:?}", e);
                 e
@@ -322,9 +323,9 @@ const APP: () = {
         audio_en.set_low();
 
         let buffers = unsafe { &mut BUFFERS };
-        let mp3_player = Mp3Player::new(&mut buffers.mp3_data, &mut buffers.pcm_buffer);
+        let mut mp3_player = Mp3Player::new(&mut buffers.mp3_data, &mut buffers.pcm_buffer);
 
-        let sound_device = SoundDevice::new(&mut buffers.dma_buffer, clocks.sysclk(), device.TIM6, device.DAC1, device.DMA1, audio_en);
+        let mut sound_device = SoundDevice::new(&mut buffers.dma_buffer, clocks.sysclk(), device.TIM6, device.DAC1, device.DMA1, audio_en);
 
         let tim7 = hal::timer::Timer::tim7(device.TIM7, 1.mhz(), clocks, &mut rcc.apb1r1);
         let mut delay = DelayTimer::new(tim7);
@@ -335,11 +336,25 @@ const APP: () = {
 
         let buttons = Buttons::new(gpiob.pb12, gpiob.pb10, gpiob.pb2, &mut gpiob.moder, &mut gpiob.pupdr);
 
-        cx.spawn
-            .start_playlist(PlaylistName::from_bytes("49DFFE97".as_bytes())) // winamp intro
-            //.start_playlist(PlaylistName::from_bytes("02".as_bytes())) // mozart stuff
-            //.start_playlist(PlaylistName::from_bytes("87B13133".as_bytes())) // mama maria
-            .expect("To start playlist");
+        let nvm_page = flash::FlashPage(127);
+        let pm = PlayingMemento::from_flash(nvm_page);
+        let mut current_playing_memento_addr = None;
+        let mut current_playlist = None;
+        if let Some((playing_memento, addr)) = pm {
+            current_playing_memento_addr.replace(addr);
+            match Playlist::restore_memento(playing_memento, &mut card_reader) {
+                Ok(mut playlist) => {
+                    let current_song = playlist.current_song().expect("To have a song in playing memento");
+                    mp3_player
+                        .play_song(current_song, &mut card_reader, &mut sound_device)
+                        .expect("To be able to play from memento");
+                    sound_device.toggle_pause();
+                    current_playlist.replace(playlist);
+                }
+                Err(error) => error!("Playing memento is wrong: {:?}", error),
+            }
+        }
+
         cx.spawn.user_cyclic().expect("To start user cyclic task");
         cx.spawn.leds_cyclic().expect("To start leds cyclic task");
         cx.spawn.battery_status().expect("To start battery status task");
@@ -361,6 +376,7 @@ const APP: () = {
                 state_leds,
             },
             audio_out,
+            current_playlist,
             buttons,
             rfid_reader,
             sleep_manager,
@@ -371,6 +387,7 @@ const APP: () = {
             user_cyclic_time,
             leds_cyclic_time,
             time_computer,
+            current_playing_memento_addr,
         }
     }
 
