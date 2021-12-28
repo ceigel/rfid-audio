@@ -28,16 +28,12 @@ impl core::fmt::Display for PlaylistName {
 impl PlaylistName {
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let name_len = bytes.len();
-        let mut slf = Self {
-            name: [0; 8],
-            name_len,
-        };
+        let mut slf = Self { name: [0; 8], name_len };
         slf.name[0..name_len].clone_from_slice(bytes);
         slf
     }
     pub fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.name[..self.name_len])
-            .expect("To be able to convert playlist name to str")
+        core::str::from_utf8(&self.name[..self.name_len]).expect("To be able to convert playlist name to str")
     }
 }
 
@@ -81,22 +77,15 @@ impl Playlist {
         })
     }
 
-    pub fn restore_memento(
-        memento: PlayingMemento,
-        card_reader: &mut CardReader,
-    ) -> Result<Self, FileError> {
-        card_reader
-            .open_directory(memento.playlist.as_str())
-            .map(|mut playlist| {
-                let file = card_reader
-                    .open_file_in_dir(&memento.file, &mut playlist.directory)
-                    .map(|mut f| {
-                        f.seek_from_start(memento.offset).ok();
-                        f
-                    });
-                playlist.current_file = file.ok();
-                playlist
-            })
+    pub fn restore_memento(memento: PlayingMemento, card_reader: &mut CardReader) -> Result<Self, FileError> {
+        card_reader.open_directory(memento.playlist.as_str()).map(|mut playlist| {
+            let file = card_reader.open_file_in_dir(&memento.file, &mut playlist.directory).map(|mut f| {
+                f.seek_from_start(memento.offset).ok();
+                f
+            });
+            playlist.current_file = file.ok();
+            playlist
+        })
     }
 
     pub fn move_next(
@@ -113,30 +102,14 @@ impl Playlist {
             }
         };
         let current_dir_entry = self.current_file.as_ref().map(|f| f.dir_entry.clone());
-        self.current_file
-            .take()
-            .map(|f| f.close_file(directory_navigator))
-            .transpose()?;
-        let next_dir_entry = directory_navigator.next_file(
-            &self.directory,
-            current_dir_entry.as_ref(),
-            "MP3",
-            comp,
-        )?;
+        self.current_file.take().map(|f| f.close_file(directory_navigator)).transpose()?;
+        let next_dir_entry = directory_navigator.next_file(&self.directory, current_dir_entry.as_ref(), "MP3", comp)?;
         let current_file = match next_dir_entry {
             Some(ref de) => Some(DataReader::open_direntry(directory_navigator, de)?),
             None => None,
         };
         self.current_file = current_file;
         Ok(self.current_song())
-    }
-
-    fn open_file(
-        &self,
-        file_name: &sdmmc::ShortFileName,
-        card_reader: &mut CardReader,
-    ) -> Result<DataReader, FileError> {
-        card_reader.open_file_in_dir(file_name, &self.directory)
     }
 
     pub fn current_song(&mut self) -> Option<&mut DataReader> {
@@ -148,8 +121,7 @@ impl Playlist {
     }
 
     pub fn close(self, directory_navigator: &mut impl DirectoryNavigator) {
-        self.current_file
-            .map(|cf| cf.close_file(directory_navigator));
+        self.current_file.map(|cf| cf.close_file(directory_navigator));
         directory_navigator.close_dir(self.directory);
     }
 }

@@ -13,6 +13,7 @@ mod cycles_computer;
 mod data_reader;
 mod hex;
 mod mp3_player;
+mod nvm_adapter;
 mod playing_memento;
 mod playlist;
 mod sleep_manager;
@@ -22,6 +23,7 @@ mod state;
 use buttons::{ButtonKind, Buttons};
 use data_reader::SdCardReader;
 use mp3_player::{Mp3Player, PlayError};
+use nvm_adapter::NvmAdapter;
 use playlist::{Playlist, PlaylistMoveDirection, PlaylistName};
 use sleep_manager::SleepManager;
 use sound_device::{DmaState, SoundDevice, DMA_LENGTH};
@@ -33,7 +35,6 @@ use cortex_m_log::printer::itm::InterruptSync;
 use cycles_computer::CyclesComputer;
 use embedded_hal::digital::v1_compat;
 use hal::adc::ADC;
-use hal::flash;
 use hal::gpio::{gpioa, gpiob, Alternate, Analog, Floating, Input, OpenDrain, Output, PushPull};
 use hal::hal as embedded_hal;
 use hal::spi::Spi;
@@ -84,7 +85,7 @@ impl Buffers {
 }
 static mut BUFFERS: Buffers = Buffers::new();
 
-fn init_clocks(cfgr: hal::rcc::CFGR, mut flash: hal::flash::Parts, mut pwr: hal::pwr::Pwr) -> hal::rcc::Clocks {
+fn init_clocks(cfgr: hal::rcc::CFGR, flash: &mut hal::flash::Parts, mut pwr: hal::pwr::Pwr) -> hal::rcc::Clocks {
     cfgr.hse(8.mhz(), hal::rcc::CrystalBypass::Disable, hal::rcc::ClockSecuritySystem::Disable)
         .pll_source(hal::rcc::PllSource::HSE)
         .sysclk(72.mhz())
@@ -225,7 +226,8 @@ const APP: () = {
         user_cyclic_time: rtic::cyccnt::Duration,
         leds_cyclic_time: rtic::cyccnt::Duration,
         time_computer: CyclesComputer,
-        current_playing_memento_addr: Option<usize>,
+        next_memento_address: Option<usize>,
+        nvm_adapter: NvmAdapter,
     }
 
     #[init(spawn=[start_playlist, user_cyclic, leds_cyclic, battery_status])]
@@ -240,10 +242,11 @@ const APP: () = {
         let mut rcc = device.RCC.constrain();
         let mut gpioa = device.GPIOA.split(&mut rcc.ahb2);
 
-        let flash = device.FLASH.constrain();
+        let mut flash = device.FLASH.constrain();
         let pwr = device.PWR.constrain(&mut rcc.apb1r1);
-        let clocks = init_clocks(rcc.cfgr, flash, pwr);
+        let clocks = init_clocks(rcc.cfgr, &mut flash, pwr);
 
+        let nvm_adapter = NvmAdapter::new(flash.keyr, flash.sr, flash.cr);
         let logger: &Logger<InterruptSync> = unsafe {
             LOGGER.replace(Logger {
                 inner: InterruptSync::new(destination::itm::Itm::new(core.ITM)),
@@ -336,12 +339,10 @@ const APP: () = {
 
         let buttons = Buttons::new(gpiob.pb12, gpiob.pb10, gpiob.pb2, &mut gpiob.moder, &mut gpiob.pupdr);
 
-        let nvm_page = flash::FlashPage(127);
-        let pm = PlayingMemento::from_flash(nvm_page);
-        let mut current_playing_memento_addr = None;
+        let (pm, offset) = NvmAdapter::read_memento();
+        let next_memento_address = offset;
         let mut current_playlist = None;
-        if let Some((playing_memento, addr)) = pm {
-            current_playing_memento_addr.replace(addr);
+        if let Some(playing_memento) = pm {
             match Playlist::restore_memento(playing_memento, &mut card_reader) {
                 Ok(mut playlist) => {
                     let current_song = playlist.current_song().expect("To have a song in playing memento");
@@ -387,7 +388,8 @@ const APP: () = {
             user_cyclic_time,
             leds_cyclic_time,
             time_computer,
-            current_playing_memento_addr,
+            next_memento_address,
+            nvm_adapter,
         }
     }
 
@@ -443,9 +445,7 @@ const APP: () = {
     fn shut_down(cx: shut_down::Context) {
         let mut playing_resources = cx.resources.playing_resources;
         let mut rfid_reader = cx.resources.rfid_reader;
-        let mut current_playlist = cx.resources.current_playlist;
         playing_resources.lock(|pr| {
-            let memento = current_playlist.lock(|pl| pr.get_memento(&pl));
             rfid_reader.lock(|rfid_reader| {
                 SleepManager::shut_down(&mut pr.state_leds, rfid_reader, &mut pr.sound_device);
             });
@@ -482,7 +482,7 @@ const APP: () = {
         }
     }
 
-    #[task(resources=[playing_resources], priority=8, spawn=[playlist_next])]
+    #[task(resources=[playing_resources], priority=8, spawn=[playlist_next, save_memento])]
     fn btn_pressed(cx: btn_pressed::Context, btn_kind: ButtonKind) {
         match btn_kind {
             ButtonKind::Next => {
@@ -500,7 +500,21 @@ const APP: () = {
             ButtonKind::Pause => {
                 info!("Toggle pause");
                 cx.resources.playing_resources.sound_device.toggle_pause();
+                cx.spawn.save_memento().ok();
             }
+        }
+    }
+
+    #[task(resources = [nvm_adapter, current_playlist, playing_resources, next_memento_address])]
+    fn save_memento(cx: save_memento::Context) {
+        let mut current_playlist = cx.resources.current_playlist;
+        let mut playing_resources = cx.resources.playing_resources;
+        let memento = playing_resources.lock(|pr| current_playlist.lock(|pl| pr.get_memento(&pl)));
+        if let Some(memento) = memento {
+            let nvm_adapter = cx.resources.nvm_adapter;
+            let next_write_offset = cx.resources.next_memento_address.take();
+            let next_write_offset = nvm_adapter.write_memento(&memento, next_write_offset);
+            *cx.resources.next_memento_address = next_write_offset;
         }
     }
 
