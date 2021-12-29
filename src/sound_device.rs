@@ -259,7 +259,7 @@ impl<'a> SoundDevice<'a> {
 
     pub fn set_dma_stop(&mut self, state: DmaState) -> DmaState {
         self.stopping = true;
-        let stop_index = self.stop_at_buffer_len.expect("To have stop_index set");
+        let stop_index = self.stop_at_buffer_len.unwrap();
         self.dma1.ccr3.modify(|_, w| w.en().disabled());
         if (stop_index == 0 && state == DmaState::TriggerComplete) || (stop_index == self.dma_buffer.len() / 2 && state == DmaState::HalfTrigger) {
             self.stop_playing();

@@ -33,10 +33,7 @@ pub struct Mp3Player<'a> {
 }
 
 impl<'a> Mp3Player<'a> {
-    pub fn new(
-        mp3_data: &'a mut [u8; MP3_DATA_LENGTH],
-        pcm_buffer: &'a mut [i16; mp3::MAX_SAMPLES_PER_FRAME],
-    ) -> Self {
+    pub fn new(mp3_data: &'a mut [u8; MP3_DATA_LENGTH], pcm_buffer: &'a mut [i16; mp3::MAX_SAMPLES_PER_FRAME]) -> Self {
         Self {
             read_index: 0,
             write_index: 0,
@@ -52,23 +49,18 @@ impl<'a> Mp3Player<'a> {
         data_reader: &mut DataReader,
         directory_navigator: &mut impl DirectoryNavigator,
         sound_device: &mut SoundDevice,
+        skip_header: bool,
     ) -> Result<(), PlayError> {
-        info!(
-            "Playing song {}, size {}",
-            data_reader.file_name(),
-            data_reader.remaining()
-        );
+        info!("Playing song {}, size {}", data_reader.file_name(), data_reader.remaining());
         self.reset();
-        self.skip_id3v2_header(data_reader, directory_navigator)?;
+        if skip_header {
+            self.skip_id3v2_header(data_reader, directory_navigator)?;
+        }
         self.init_buffer(data_reader, directory_navigator)?;
         sound_device.start_playing(self, data_reader, directory_navigator)
     }
 
-    fn skip_id3v2_header(
-        &mut self,
-        data_reader: &mut DataReader,
-        directory_navigator: &mut impl DirectoryNavigator,
-    ) -> Result<(), PlayError> {
+    fn skip_id3v2_header(&mut self, data_reader: &mut DataReader, directory_navigator: &mut impl DirectoryNavigator) -> Result<(), PlayError> {
         const MP3_DETECT_SIZE: usize = 10;
         let buf = &mut self.mp3_data[0..MP3_DETECT_SIZE];
         let bytes_red = data_reader.read_data(directory_navigator, buf)?;
@@ -82,25 +74,16 @@ impl<'a> Mp3Player<'a> {
         {
             return Err(PlayError::NotAnMp3);
         }
-        let mut id3v2size: u32 = (((buf[6] as u32 & 0x7f) << 21)
-            | ((buf[7] as u32 & 0x7f) << 14)
-            | ((buf[8] as u32 & 0x7f) << 7)
-            | (buf[9] as u32 & 0x7f))
-            + 10;
+        let mut id3v2size: u32 =
+            (((buf[6] as u32 & 0x7f) << 21) | ((buf[7] as u32 & 0x7f) << 14) | ((buf[8] as u32 & 0x7f) << 7) | (buf[9] as u32 & 0x7f)) + 10;
         if buf[5] & 0x10 != 0 {
             id3v2size += 10;
         }
         info!("ID3V2 size is {}", id3v2size);
-        data_reader
-            .seek_from_start(id3v2size)
-            .map_err(|_| PlayError::FileToShort)
+        data_reader.seek_from_start(id3v2size).map_err(|_| PlayError::FileToShort)
     }
 
-    pub fn fill_buffer(
-        &mut self,
-        data_reader: &mut DataReader,
-        directory_navigator: &mut impl DirectoryNavigator,
-    ) -> Result<(), PlayError> {
+    pub fn fill_buffer(&mut self, data_reader: &mut DataReader, directory_navigator: &mut impl DirectoryNavigator) -> Result<(), PlayError> {
         self.fill_buffer_intern(data_reader, directory_navigator)
     }
 
@@ -110,19 +93,11 @@ impl<'a> Mp3Player<'a> {
         self.last_frame_rate = None;
     }
 
-    fn init_buffer(
-        &mut self,
-        data_reader: &mut DataReader,
-        directory_navigator: &mut impl DirectoryNavigator,
-    ) -> Result<(), PlayError> {
+    fn init_buffer(&mut self, data_reader: &mut DataReader, directory_navigator: &mut impl DirectoryNavigator) -> Result<(), PlayError> {
         self.fill_buffer_intern(data_reader, directory_navigator)
     }
 
-    pub fn fill_buffer_intern(
-        &mut self,
-        data_reader: &mut DataReader,
-        directory_navigator: &mut impl DirectoryNavigator,
-    ) -> Result<(), PlayError> {
+    pub fn fill_buffer_intern(&mut self, data_reader: &mut DataReader, directory_navigator: &mut impl DirectoryNavigator) -> Result<(), PlayError> {
         if data_reader.done() {
             return Ok(());
         }
@@ -186,13 +161,19 @@ impl<'a> Mp3Player<'a> {
                     match self.read_index.checked_add(skipped_data) {
                         Some(new_val) => {
                             if new_val >= self.write_index {
-                                error!("Skipped data outside buffer. read_index: {}, write_index: {}, skipped_data: {}", self.read_index, self.write_index, skipped_data);
+                                error!(
+                                    "Skipped data outside buffer. read_index: {}, write_index: {}, skipped_data: {}",
+                                    self.read_index, self.write_index, skipped_data
+                                );
                                 return index;
                             }
                             self.read_index = new_val;
                         }
                         None => {
-                            error!("Skipped data overflowed read_index add. read_index: {}, skipped_data: {}", self.read_index, skipped_data);
+                            error!(
+                                "Skipped data overflowed read_index add. read_index: {}, skipped_data: {}",
+                                self.read_index, skipped_data
+                            );
                             return index;
                         }
                     }

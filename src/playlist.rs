@@ -33,7 +33,7 @@ impl PlaylistName {
         slf
     }
     pub fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.name[..self.name_len]).expect("To be able to convert playlist name to str")
+        core::str::from_utf8(&self.name[..self.name_len]).unwrap()
     }
 }
 
@@ -78,13 +78,12 @@ impl Playlist {
     }
 
     pub fn restore_memento(memento: PlayingMemento, card_reader: &mut CardReader) -> Result<Self, FileError> {
-        card_reader.open_directory(memento.playlist.as_str()).map(|mut playlist| {
-            let file = card_reader.open_file_in_dir(&memento.file, &mut playlist.directory).map(|mut f| {
-                f.seek_from_start(memento.offset).ok();
-                f
-            });
-            playlist.current_file = file.ok();
-            playlist
+        card_reader.open_directory(memento.playlist.as_str()).and_then(|mut playlist| {
+            card_reader.open_file_in_dir(&memento.file, &playlist.directory).map(|mut file| {
+                file.seek_from_start(memento.offset).ok();
+                playlist.current_file.replace(file);
+                playlist
+            })
         })
     }
 

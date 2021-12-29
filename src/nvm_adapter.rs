@@ -80,11 +80,15 @@ impl NvmAdapter {
         }
     }
 
+    #[inline(never)]
     fn memento_to_flash(memento: &PlayingMemento, buffer: &mut [u64; FLASH_MEM_QUAD]) {
         let slice_size = buffer.len() * 8; // quad = 8 bytes
+        info!("buffer: {:?}", buffer.as_ptr());
         let buf_slice: &mut [u8] = unsafe { &mut *core::ptr::slice_from_raw_parts_mut(buffer.as_mut_ptr() as *mut u8, slice_size) };
+        info!("buf_slice: {:?}", buf_slice.as_ptr());
         buf_slice[0] = MAGIC;
-        let rest_arr: &mut [u8; PLAYING_MEMENTO_DATA_SIZE] = &mut buf_slice[1..].try_into().expect("To get part of the array");
-        memento.serialize(rest_arr);
+        let mut memento_arr: [u8; PLAYING_MEMENTO_DATA_SIZE] = [0; PLAYING_MEMENTO_DATA_SIZE];
+        memento.serialize(&mut memento_arr);
+        buf_slice[1..].copy_from_slice(&memento_arr);
     }
 }

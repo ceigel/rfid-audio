@@ -2,6 +2,7 @@ use crate::playlist::{PlaylistName, PLAYLIST_NAME_LEN};
 use core::convert::TryInto;
 use core::str;
 use embedded_sdmmc::{FilenameError, ShortFileName};
+use log::info;
 
 pub struct PlayingMemento {
     pub playlist: PlaylistName, // 8 bytes
@@ -27,21 +28,40 @@ impl PlayingMemento {
         self.offset = new_offset;
     }
 
+    #[inline(never)]
     pub fn serialize(&self, bytes: &mut [u8; PLAYING_MEMENTO_DATA_SIZE]) {
+        info!("serialize bytes: {:?}", bytes[..].as_ptr());
         bytes[0..PLAYLIST_NAME_LEN].copy_from_slice(&self.playlist.name[..]);
-        bytes[FILE_MEM_OFFSET..OFFSET_MEM_OFFSET].copy_from_slice(&self.file.base_name()[..]);
+        let base_name = self.file.base_name();
+        let extension = self.file.extension();
+        let base_name_end = FILE_MEM_OFFSET + base_name.len();
+        bytes[FILE_MEM_OFFSET..base_name_end].copy_from_slice(base_name);
+        let extension_begin = OFFSET_MEM_OFFSET - extension.len();
+        bytes[extension_begin..OFFSET_MEM_OFFSET].copy_from_slice(extension);
         bytes[OFFSET_MEM_OFFSET..].copy_from_slice(&self.offset.to_be_bytes()[..]);
     }
 
     pub fn deserialize(buffer: &[u8; PLAYING_MEMENTO_DATA_SIZE]) -> Result<Self, FilenameError> {
         let playlist = PlaylistName::from_bytes(&buffer[0..PLAYLIST_NAME_LEN]);
-        let file_name = str::from_utf8(&buffer[FILE_MEM_OFFSET..OFFSET_MEM_OFFSET]).map_err(|_| FilenameError::Utf8Error);
-        let offset_bytes = *&buffer[OFFSET_MEM_OFFSET..].try_into();
-        let offset = offset_bytes.map(|bytes| u32::from_be_bytes(bytes)).unwrap_or(0);
-        let playing_memento = file_name
+        let mut file_name_buffer = [0u8; 12];
+        file_name_buffer[0..8].copy_from_slice(
+            &buffer[FILE_MEM_OFFSET..(OFFSET_MEM_OFFSET - 3)]
+                .split(|x| *x == 0u8)
+                .next()
+                .unwrap_or(&[]),
+        );
+        file_name_buffer[8] = b'.';
+        file_name_buffer[9..].copy_from_slice(
+            &buffer[(OFFSET_MEM_OFFSET - 3)..OFFSET_MEM_OFFSET]
+                .split(|x| *x == 0u8)
+                .next()
+                .unwrap_or(&[]),
+        );
+        let file_name = str::from_utf8(&file_name_buffer).map_err(|_| FilenameError::Utf8Error);
+        let offset_bytes = buffer[OFFSET_MEM_OFFSET..].try_into();
+        let offset = offset_bytes.map(u32::from_be_bytes).unwrap_or(0);
+        file_name
             .and_then(|fnm| ShortFileName::create_from_str(fnm))
-            .map(|file| PlayingMemento { playlist, file, offset });
-
-        playing_memento
+            .map(|file| PlayingMemento { playlist, file, offset })
     }
 }

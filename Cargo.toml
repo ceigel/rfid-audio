@@ -17,8 +17,8 @@ nb = "1.0.0"
 
 [dependencies.mfrc522]
 version = "0.2.0"
-#git="https://github.com/ceigel/mfrc522.git"
-path="../mfrc522"
+git="https://github.com/ceigel/mfrc522.git"
+#path="../mfrc522"
 
 [dependencies.embedded-mp3]
 version = "0.1.0"
@@ -34,10 +34,6 @@ git = "https://github.com/stm32-rs/stm32l4xx-hal.git"
 git = "https://github.com/rust-embedded-community/embedded-sdmmc-rs.git"
 #path="../embedded-sdmmc-rs/"
 rev = "8d27bebbf75623e5e52b63c7f41fa63ee04142ab"
-
-[dependencies.cast]
-default-features = false
-version = "0.2.7"
 
 # this lets you use `cargo fix`!
 [[bin]]
@@ -55,5 +51,5 @@ opt-level = 3
 opt-level='z'
 
 [profile.dev.package."*"]
-opt-level=3
+opt-level='z'
 debug = true # symbols are nice and they don't increase the size on Flash

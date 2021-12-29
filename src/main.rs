@@ -48,6 +48,7 @@ use log::{error, info};
 use mfrc522::{self, Mfrc522};
 use playing_memento::PlayingMemento;
 use rtic::app;
+use state::{InitState, State, StateLeds};
 use stm32l4xx_hal::stm32 as stm32l431;
 
 static mut LOGGER: Option<Logger<InterruptSync>> = None;
@@ -166,7 +167,7 @@ pub struct PlayingResources {
     pub sound_device: SoundDevice<'static>,
     pub mp3_player: Mp3Player<'static>,
     pub card_reader: SdCardReader<hal::gpio::gpioa::PA3<Output<OpenDrain>>>,
-    pub state_leds: state::StateLeds,
+    pub state_leds: StateLeds,
 }
 
 impl PlayingResources {
@@ -177,7 +178,7 @@ impl PlayingResources {
                 return playlist.get_memento(already_read as u32);
             }
         }
-        return None;
+        None
     }
 }
 
@@ -201,7 +202,7 @@ impl<T: CountDown<Time = hal::time::Hertz>> DelayUs<u32> for DelayTimer<T> {
         use hal::time::{MegaHertz, U32Ext};
         let mhz: MegaHertz = us.mhz();
         self.timer.start(mhz);
-        block!(self.timer.wait()).expect("To be able to wait for timer");
+        block!(self.timer.wait()).unwrap();
     }
 }
 
@@ -215,6 +216,7 @@ const APP: () = {
     struct Resources {
         playing_resources: PlayingResources,
         audio_out: gpioa::PA4<Analog>,
+        #[init(None)]
         current_playlist: Option<Playlist>,
         buttons: Buttons,
         rfid_reader: RFIDReaderType,
@@ -226,11 +228,12 @@ const APP: () = {
         user_cyclic_time: rtic::cyccnt::Duration,
         leds_cyclic_time: rtic::cyccnt::Duration,
         time_computer: CyclesComputer,
+        #[init(None)]
         next_memento_address: Option<usize>,
         nvm_adapter: NvmAdapter,
     }
 
-    #[init(spawn=[start_playlist, user_cyclic, leds_cyclic, battery_status])]
+    #[init(spawn=[read_memento, user_cyclic, leds_cyclic, battery_status])]
     fn init(cx: init::Context) -> init::LateResources {
         let mut core = cx.core;
         core.DCB.enable_trace();
@@ -252,9 +255,9 @@ const APP: () = {
                 inner: InterruptSync::new(destination::itm::Itm::new(core.ITM)),
                 level: LOG_LEVEL,
             });
-            LOGGER.as_ref().expect("to have a logger")
+            LOGGER.as_ref().unwrap()
         };
-        cortex_m_log::log::init(logger).expect("To set logger");
+        cortex_m_log::log::init(logger).unwrap();
 
         let mut gpiob = device.GPIOB.split(&mut rcc.ahb2);
         let led_nose_b = gpioa.pa0.into_alternate::<1>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl);
@@ -269,8 +272,8 @@ const APP: () = {
         let tim2_pwm = device
             .TIM2
             .pwm((led_nose_b, led_nose_g, led_nose_r, led_mouth), 1.khz(), clocks, &mut rcc.apb1r1);
-        let mut state_leds = state::StateLeds::new(tim2_pwm.0, tim2_pwm.1, tim2_pwm.2, led_eye, tim2_pwm.3);
-        state_leds.set_state(state::State::Init(state::InitState::Begin));
+        let mut state_leds = StateLeds::new(tim2_pwm.0, tim2_pwm.1, tim2_pwm.2, led_eye, tim2_pwm.3);
+        state_leds.set_state(State::Init(InitState::Begin));
 
         let pa5 = gpioa
             .pa5
@@ -310,15 +313,15 @@ const APP: () = {
         cs1.set_high();
         let cs2 = gpioa.pa8.into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
 
-        state_leds.set_state(state::State::Init(state::InitState::SetSDCard));
-        let mut card_reader = SdCardReader::new(spi1, cs1, 8.mhz(), clocks)
+        state_leds.set_state(State::Init(InitState::SetSDCard));
+        let card_reader = SdCardReader::new(spi1, cs1, 8.mhz(), clocks)
             .map_err(|e| {
                 error!("Card reader init failed: {:?}", e);
                 e
             })
-            .expect("To have a sd card reader");
+            .unwrap();
 
-        state_leds.set_state(state::State::Init(state::InitState::SetRFID));
+        state_leds.set_state(State::Init(InitState::SetRFID));
         let rfid_reader = init_rfid_reader(spi2, cs2);
 
         let audio_out = gpioa.pa4.into_analog(&mut gpioa.moder, &mut gpioa.pupdr); // Speaker out
@@ -326,9 +329,9 @@ const APP: () = {
         audio_en.set_low();
 
         let buffers = unsafe { &mut BUFFERS };
-        let mut mp3_player = Mp3Player::new(&mut buffers.mp3_data, &mut buffers.pcm_buffer);
+        let mp3_player = Mp3Player::new(&mut buffers.mp3_data, &mut buffers.pcm_buffer);
 
-        let mut sound_device = SoundDevice::new(&mut buffers.dma_buffer, clocks.sysclk(), device.TIM6, device.DAC1, device.DMA1, audio_en);
+        let sound_device = SoundDevice::new(&mut buffers.dma_buffer, clocks.sysclk(), device.TIM6, device.DAC1, device.DMA1, audio_en);
 
         let tim7 = hal::timer::Timer::tim7(device.TIM7, 1.mhz(), clocks, &mut rcc.apb1r1);
         let mut delay = DelayTimer::new(tim7);
@@ -339,26 +342,10 @@ const APP: () = {
 
         let buttons = Buttons::new(gpiob.pb12, gpiob.pb10, gpiob.pb2, &mut gpiob.moder, &mut gpiob.pupdr);
 
-        let (pm, offset) = NvmAdapter::read_memento();
-        let next_memento_address = offset;
-        let mut current_playlist = None;
-        if let Some(playing_memento) = pm {
-            match Playlist::restore_memento(playing_memento, &mut card_reader) {
-                Ok(mut playlist) => {
-                    let current_song = playlist.current_song().expect("To have a song in playing memento");
-                    mp3_player
-                        .play_song(current_song, &mut card_reader, &mut sound_device)
-                        .expect("To be able to play from memento");
-                    sound_device.toggle_pause();
-                    current_playlist.replace(playlist);
-                }
-                Err(error) => error!("Playing memento is wrong: {:?}", error),
-            }
-        }
-
-        cx.spawn.user_cyclic().expect("To start user cyclic task");
-        cx.spawn.leds_cyclic().expect("To start leds cyclic task");
-        cx.spawn.battery_status().expect("To start battery status task");
+        cx.spawn.user_cyclic().unwrap();
+        cx.spawn.leds_cyclic().unwrap();
+        cx.spawn.battery_status().unwrap();
+        cx.spawn.read_memento().unwrap();
 
         let time_computer = CyclesComputer::new(clocks.sysclk());
         let btn_click_debase = time_computer.to_cycles(BTN_CLICK_DEBASE);
@@ -368,7 +355,7 @@ const APP: () = {
         let sleep_manager = SleepManager::new(SLEEP_TIME, USER_CYCLIC_TIME);
 
         info!("Init finished");
-        state_leds.set_state(state::State::Init(state::InitState::InitFinished));
+        state_leds.set_state(State::Init(InitState::InitFinished));
         init::LateResources {
             playing_resources: PlayingResources {
                 sound_device,
@@ -377,7 +364,6 @@ const APP: () = {
                 state_leds,
             },
             audio_out,
-            current_playlist,
             buttons,
             rfid_reader,
             sleep_manager,
@@ -388,7 +374,6 @@ const APP: () = {
             user_cyclic_time,
             leds_cyclic_time,
             time_computer,
-            next_memento_address,
             nvm_adapter,
         }
     }
@@ -427,18 +412,14 @@ const APP: () = {
             &mut cx.resources.rfid_reader,
             sound_device,
         );
-        cx.schedule
-            .user_cyclic(cx.scheduled + user_cyclic_time)
-            .expect("To be able to schedule user_cyclic");
+        cx.schedule.user_cyclic(cx.scheduled + user_cyclic_time).unwrap();
     }
 
     #[task(resources=[leds_cyclic_time, playing_resources], schedule=[leds_cyclic])]
     fn leds_cyclic(mut cx: leds_cyclic::Context) {
         let leds_cyclic_time = *cx.resources.leds_cyclic_time;
         cx.resources.playing_resources.lock(|pr| pr.state_leds.show_state());
-        cx.schedule
-            .leds_cyclic(cx.scheduled + leds_cyclic_time)
-            .expect("To be able to schedule user_cyclic");
+        cx.schedule.leds_cyclic(cx.scheduled + leds_cyclic_time).unwrap();
     }
 
     #[task(resources=[playing_resources, rfid_reader, current_playlist], priority=1)]
@@ -464,21 +445,17 @@ const APP: () = {
         cx.resources.playing_resources.lock(|pr| {
             if val < BATTERY_SHUTDOWN_LEVEL && !charging {
                 pr.sound_device.stop_playing();
-                pr.state_leds.set_state(state::State::ShuttingDown);
+                pr.state_leds.set_state(State::ShuttingDown);
                 shut_down = true;
             }
         });
         if shut_down {
             let shutting_down_time = tc.to_cycles(SHUTTING_DOWN_TIME);
-            cx.schedule
-                .shut_down(cx.scheduled + shutting_down_time)
-                .expect("To be able to schedule shut_down");
+            cx.schedule.shut_down(cx.scheduled + shutting_down_time).unwrap();
             error!("Will sleep!");
         } else {
             let battery_reader_cyclic_time = tc.to_cycles(BATTERY_READER_CYCLIC_TIME);
-            cx.schedule
-                .battery_status(cx.scheduled + battery_reader_cyclic_time)
-                .expect("To be able to schedule battery_status");
+            cx.schedule.battery_status(cx.scheduled + battery_reader_cyclic_time).unwrap();
         }
     }
 
@@ -500,8 +477,38 @@ const APP: () = {
             ButtonKind::Pause => {
                 info!("Toggle pause");
                 cx.resources.playing_resources.sound_device.toggle_pause();
-                cx.spawn.save_memento().ok();
+                if cx.resources.playing_resources.sound_device.is_paused() {
+                    cx.spawn.save_memento().ok();
+                }
             }
+        }
+    }
+
+    #[task(resources = [nvm_adapter, current_playlist, playing_resources, next_memento_address])]
+    fn read_memento(mut cx: read_memento::Context) {
+        let (pm, offset) = NvmAdapter::read_memento();
+        *cx.resources.next_memento_address = offset;
+        if let Some(playing_memento) = pm {
+            let playlist = cx
+                .resources
+                .playing_resources
+                .lock(|pr| match Playlist::restore_memento(playing_memento, &mut pr.card_reader) {
+                    Ok(mut playlist) => {
+                        let current_song = playlist.current_song().unwrap();
+                        pr.mp3_player
+                            .play_song(current_song, &mut pr.card_reader, &mut pr.sound_device, false)
+                            .unwrap();
+                        pr.sound_device.toggle_pause();
+                        Some(playlist)
+                    }
+                    Err(error) => {
+                        error!("Playing memento is wrong: {:?}", error);
+                        None
+                    }
+                });
+            cx.resources.current_playlist.lock(|pl| *pl = playlist);
+        } else {
+            cx.resources.playing_resources.lock(|pr| pr.state_leds.set_state(State::NotPlaying));
         }
     }
 
@@ -509,7 +516,7 @@ const APP: () = {
     fn save_memento(cx: save_memento::Context) {
         let mut current_playlist = cx.resources.current_playlist;
         let mut playing_resources = cx.resources.playing_resources;
-        let memento = playing_resources.lock(|pr| current_playlist.lock(|pl| pr.get_memento(&pl)));
+        let memento = playing_resources.lock(|pr| current_playlist.lock(|pl| pr.get_memento(pl)));
         if let Some(memento) = memento {
             let nvm_adapter = cx.resources.nvm_adapter;
             let next_write_offset = cx.resources.next_memento_address.take();
@@ -548,12 +555,12 @@ const APP: () = {
                         .open_directory(directory_name.as_str())
                         .map_err(|e| {
                             error!("Can not open directory: {}, err: {:?}", directory_name, e);
-                            pr.state_leds.set_state(state::State::Error);
+                            pr.state_leds.set_state(State::Error);
                             e
                         })
                         .map(|next_playlist| {
                             playlist.replace(next_playlist);
-                            pr.state_leds.set_state(state::State::Playing);
+                            pr.state_leds.set_state(State::Playing);
                         });
                     play_successful = play_result.is_ok()
                 }
@@ -588,7 +595,7 @@ const APP: () = {
                                 if let Some(song) = song {
                                     let file_name = song.file_name();
                                     pr.mp3_player
-                                        .play_song(song, &mut pr.card_reader, &mut pr.sound_device)
+                                        .play_song(song, &mut pr.card_reader, &mut pr.sound_device, true)
                                         .map(|_| Some(file_name))
                                 } else {
                                     Ok(None)
@@ -596,15 +603,15 @@ const APP: () = {
                             });
                         match play_result {
                             Ok(Some(file_name)) => {
-                                pr.state_leds.set_state(state::State::Playing);
+                                pr.state_leds.set_state(State::Playing);
                                 info!("Playing {}", file_name);
                             }
                             Ok(None) => {
-                                pr.state_leds.set_state(state::State::NotPlaying);
+                                pr.state_leds.set_state(State::NotPlaying);
                                 info!("Playing nothing");
                             }
                             Err(e) => {
-                                pr.state_leds.set_state(state::State::Error);
+                                pr.state_leds.set_state(State::Error);
                                 error!("Playlist {} can't be played: {:?}", playlist.name(), e);
                             }
                         };
@@ -617,8 +624,8 @@ const APP: () = {
     #[task(capacity=1, priority=8, resources=[playing_resources, current_playlist], spawn=[playlist_next])]
     fn process_dma_request(cx: process_dma_request::Context, new_state: DmaState) {
         let pr = cx.resources.playing_resources;
-        let playlist = cx.resources.current_playlist.as_mut().expect("to have a playlist to play");
-        let current_song = playlist.current_song().expect("to play a song");
+        let playlist = cx.resources.current_playlist.as_mut().unwrap();
+        let current_song = playlist.current_song().unwrap();
         match new_state {
             DmaState::Unknown => panic!("Unknown dma state"),
             DmaState::HalfTrigger | DmaState::TriggerComplete => {
