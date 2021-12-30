@@ -80,7 +80,6 @@ impl NvmAdapter {
         }
     }
 
-    #[inline(never)]
     fn memento_to_flash(memento: &PlayingMemento, buffer: &mut [u64; FLASH_MEM_QUAD]) {
         let slice_size = buffer.len() * 8; // quad = 8 bytes
         info!("buffer: {:?}", buffer.as_ptr());

@@ -28,7 +28,6 @@ impl PlayingMemento {
         self.offset = new_offset;
     }
 
-    #[inline(never)]
     pub fn serialize(&self, bytes: &mut [u8; PLAYING_MEMENTO_DATA_SIZE]) {
         info!("serialize bytes: {:?}", bytes[..].as_ptr());
         bytes[0..PLAYLIST_NAME_LEN].copy_from_slice(&self.playlist.name[..]);
