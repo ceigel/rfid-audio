@@ -1,6 +1,5 @@
 use crate::hal::flash::{self, WriteErase};
 use crate::playing_memento::{PlayingMemento, PLAYING_MEMENTO_DATA_SIZE};
-use core::convert::TryInto;
 use log::{error, info};
 
 pub const PAGE_SIZE: usize = 2048;

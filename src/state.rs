@@ -22,7 +22,6 @@ pub enum State {
     NotPlaying,
     PlaylistNotFound,
     ShutDown,
-    ShuttingDown,
     Error,
 }
 
@@ -76,6 +75,7 @@ impl<P: PwmPin<Duty = u32>> PwmLed<P> {
 }
 pub struct StateLeds {
     state: State,
+    low_battery: bool,
     nose_b: PwmLed<Pwm<TIM2, C1>>,
     nose_g: PwmLed<Pwm<TIM2, C2>>,
     nose_r: PwmLed<Pwm<TIM2, C3>>,
@@ -94,6 +94,7 @@ impl StateLeds {
     ) -> Self {
         let mut s = Self {
             state: State::Init(InitState::Begin),
+            low_battery: false,
             nose_b: PwmLed::new(nose_b, true),
             nose_g: PwmLed::new(nose_g, true),
             nose_r: PwmLed::new(nose_r, true),
@@ -103,6 +104,11 @@ impl StateLeds {
         };
         s.init_leds();
         s
+    }
+
+    pub fn set_low_battery(&mut self, low_battery: bool) {
+        self.low_battery = low_battery;
+        self.update_state();
     }
 
     pub fn get_state(&self) -> State {
@@ -134,19 +140,12 @@ impl StateLeds {
             }
             State::Playing => {
                 self.nose_g.update_modulated();
-                self.eye.set_high();
             }
             State::NotPlaying => {
                 self.nose_b.update_modulated();
-                self.eye.set_high();
             }
             State::PlaylistNotFound => {
                 self.nose_r.update_modulated();
-                self.eye.set_high();
-            }
-            State::ShuttingDown => {
-                self.mouth.update_modulated();
-                self.eye.set_high();
             }
             _ => {}
         }
@@ -172,29 +171,32 @@ impl StateLeds {
                 self.nose_b.disable();
                 self.mouth.disable();
             }
-            State::ShuttingDown => {
-                self.eye.set_low();
-                self.nose_r.set_duty(0.0);
-                self.nose_g.set_duty(0.0);
-                self.nose_b.set_duty(0.0);
-                self.mouth.set_duty(0.0);
-            }
             State::Error => {
                 self.mouth.set_duty(0.0);
                 self.eye.set_low();
             }
             State::Playing => {
-                self.mouth.set_duty(1.0);
+                self.set_default_eye_and_mouth();
             }
             State::NotPlaying => {
-                self.mouth.set_duty(1.0);
+                self.set_default_eye_and_mouth();
             }
             State::PlaylistNotFound => {
-                self.mouth.set_duty(1.0);
+                self.set_default_eye_and_mouth();
             }
         }
 
         self.display();
+    }
+
+    fn set_default_eye_and_mouth(&mut self) {
+        if self.low_battery {
+            self.eye.set_low();
+            self.mouth.set_duty(0.0);
+        } else {
+            self.eye.set_high();
+            self.mouth.set_duty(1.0);
+        }
     }
 
     fn init_leds(&mut self) {

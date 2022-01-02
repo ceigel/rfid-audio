@@ -58,10 +58,9 @@ const USER_CYCLIC_TIME: time::Duration = time::Duration::from_millis(125);
 const SLEEP_TIME: time::Duration = time::Duration::from_secs(5 * 60);
 const LEDS_CYCLIC_TIME: time::Duration = time::Duration::from_millis(40);
 const BATTERY_READER_CYCLIC_TIME: time::Duration = time::Duration::from_secs(10);
-const SHUTTING_DOWN_TIME: time::Duration = time::Duration::from_secs(5);
 const CARD_SCAN_PAUSE: time::Duration = time::Duration::from_millis(5000);
 const BTN_CLICK_DEBASE: time::Duration = time::Duration::from_millis(500);
-const BATTERY_SHUTDOWN_LEVEL: u16 = 3350;
+const BATTERY_WARNING_LEVEL: u16 = 3350;
 
 type CardReader = SdCardReader<hal::gpio::gpioa::PA3<Output<OpenDrain>>>;
 
@@ -440,20 +439,17 @@ const APP: () = {
         let tc = cx.resources.time_computer;
         let elapsed = tc.from_cycles(start.elapsed());
         let charging = cx.resources.charging_line.is_low();
-        let mut shut_down = false;
         info!("Battery value: {}, elapsed: {}us", val, elapsed.as_micros());
-        cx.resources.playing_resources.lock(|pr| {
-            if val < BATTERY_SHUTDOWN_LEVEL && !charging {
+        let low_bat = cx.resources.playing_resources.lock(|pr| {
+            if val < BATTERY_WARNING_LEVEL && !charging {
                 pr.sound_device.stop_playing();
-                pr.state_leds.set_state(State::ShuttingDown);
-                shut_down = true;
+                pr.state_leds.set_low_battery(true);
+                true
+            } else {
+                false
             }
         });
-        if shut_down {
-            let shutting_down_time = tc.to_cycles(SHUTTING_DOWN_TIME);
-            cx.schedule.shut_down(cx.scheduled + shutting_down_time).unwrap();
-            error!("Will sleep!");
-        } else {
+        if !low_bat {
             let battery_reader_cyclic_time = tc.to_cycles(BATTERY_READER_CYCLIC_TIME);
             cx.schedule.battery_status(cx.scheduled + battery_reader_cyclic_time).unwrap();
         }
