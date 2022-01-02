@@ -44,17 +44,17 @@ impl PlayingMemento {
         let playlist = PlaylistName::from_bytes(&buffer[0..PLAYLIST_NAME_LEN]);
         let mut file_name_buffer = [0u8; 12];
         file_name_buffer[0..8].copy_from_slice(
-            &buffer[FILE_MEM_OFFSET..(OFFSET_MEM_OFFSET - 3)]
+            buffer[FILE_MEM_OFFSET..(OFFSET_MEM_OFFSET - 3)]
                 .split(|x| *x == 0u8)
                 .next()
-                .unwrap_or(&[]),
+                .unwrap_or_default(),
         );
         file_name_buffer[8] = b'.';
         file_name_buffer[9..].copy_from_slice(
-            &buffer[(OFFSET_MEM_OFFSET - 3)..OFFSET_MEM_OFFSET]
+            buffer[(OFFSET_MEM_OFFSET - 3)..OFFSET_MEM_OFFSET]
                 .split(|x| *x == 0u8)
                 .next()
-                .unwrap_or(&[]),
+                .unwrap_or_default(),
         );
         let file_name = str::from_utf8(&file_name_buffer).map_err(|_| FilenameError::Utf8Error);
         let offset_bytes = buffer[OFFSET_MEM_OFFSET..].try_into();
